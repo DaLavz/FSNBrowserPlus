@@ -1,7 +1,9 @@
 // ==UserScript==
+// @updateURL    https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
+// @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      1.8
+// @version      1.9
 // @description  S = save menu, L = load menu (6 slots). Shows a route guide on choice screens (H hides it).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -48,6 +50,38 @@ function shortPath(url) {
   }
 }
 
+function titleCase(str) {
+  return str.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// /fate/3rd-day/0#page91  ->  Route "Fate", Scene "3rd Day", Part "0", Page "91"
+function parseUrl(url) {
+  let u;
+  try { u = new URL(url); } catch { return { route: url, scene: "–", part: "–", page: "–" }; }
+  const seg = u.pathname.split("/").filter(Boolean).map((x) => {
+    try { return decodeURIComponent(x); } catch { return x; }
+  });
+  const m = u.hash.match(/(\d+)/);
+  return {
+    route: seg[0] ? titleCase(seg[0]) : "–",
+    scene: seg[1] ? titleCase(seg[1]) : "–",
+    part: seg[2] !== undefined ? seg[2] : "–",
+    page: m ? m[1] : "–"
+  };
+}
+
+function prettyLabel(url) {
+  const p = parseUrl(url);
+  const out = [];
+  if (p.route !== "–") out.push(p.route);
+  if (p.scene !== "–") out.push(p.scene);
+  if (p.part !== "–") out.push("Part " + p.part);
+  if (p.page !== "–") out.push("Page " + p.page);
+  return out.join(" \u00b7 ") || url;
+}
+
+const COLS = "18px 110px 70px 40px 40px";
+
 function getSlots(cb) {
   let slots = GM_getValue("fsnSlots", null);
   if (!Array.isArray(slots)) slots = Array(SLOTS).fill(null);
@@ -85,9 +119,9 @@ function renderMenu(slots, message) {
     const i = pending;
     menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "8px", color: theme.title }, "Replace slot " + (i + 1) + "?"));
     menu.appendChild(el("div", { fontSize: "12px", color: "#aaa" }, "Current:"));
-    menu.appendChild(el("div", { marginBottom: "6px" }, shortPath(slots[i].url)));
+    menu.appendChild(el("div", { marginBottom: "6px" }, prettyLabel(slots[i].url)));
     menu.appendChild(el("div", { fontSize: "12px", color: "#aaa" }, "New:"));
-    menu.appendChild(el("div", { marginBottom: "8px" }, shortPath(location.href)));
+    menu.appendChild(el("div", { marginBottom: "8px" }, prettyLabel(location.href)));
     menu.appendChild(el("div", { color: "#ffb35a", fontSize: "12px", marginBottom: "8px" }, "The old save will be deleted."));
     const btns = el("div", { display: "flex", gap: "8px" });
     const mk = (label, bg, fn) => {
@@ -108,13 +142,28 @@ function renderMenu(slots, message) {
   const title = (mode === "save" ? "Save" : "Load") + ": press 1-" + SLOTS;
   menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "8px", color: theme.title }, title));
 
+  const head = el("div", {
+    display: "grid", gridTemplateColumns: COLS, gap: "8px", padding: "0 6px 4px",
+    color: "#888", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.5px"
+  });
+  ["#", "Route", "Scene", "Part", "Page"].forEach((h) => head.appendChild(el("span", {}, h)));
+  menu.appendChild(head);
+
   slots.forEach((slot, i) => {
     const row = el("div", {
-      display: "flex", gap: "10px", padding: "5px 6px", cursor: "pointer",
-      borderRadius: "4px", background: theme.row, marginBottom: "4px"
+      display: "grid", gridTemplateColumns: COLS, gap: "8px", padding: "5px 6px",
+      cursor: "pointer", borderRadius: "4px", background: theme.row, marginBottom: "4px"
     });
-    row.appendChild(el("span", { fontWeight: "bold", width: "14px" }, String(i + 1)));
-    row.appendChild(el("span", { color: slot ? "#fff" : "#888" }, slot ? shortPath(slot.url) : "Empty"));
+    row.appendChild(el("span", { fontWeight: "bold" }, String(i + 1)));
+    if (slot) {
+      const p = parseUrl(slot.url);
+      row.appendChild(el("span", {}, p.route));
+      row.appendChild(el("span", {}, p.scene));
+      row.appendChild(el("span", {}, p.part));
+      row.appendChild(el("span", {}, p.page));
+    } else {
+      row.appendChild(el("span", { color: "#888", gridColumn: "2 / 6" }, "Empty"));
+    }
     row.addEventListener("click", () => chooseSlot(i));
     menu.appendChild(row);
   });
