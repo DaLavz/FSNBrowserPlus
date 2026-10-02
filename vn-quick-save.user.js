@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      2.3
+// @version      2.4
 // @description  S = save menu, L = load menu (6 slots + auto-save). Shows a route guide on choice screens (H hides it).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -108,11 +108,12 @@ function prettyLabel(url) {
   return out.join(" \u00b7 ") || url;
 }
 
-// "fate/3rd-day": route + scene. Changes when you move to a new scene.
+// "fate/3rd-day/0": route + scene + part. Changes when you move to a new part
+// (a new scene or route also changes it). The page number is ignored.
 function sceneKey() {
   try {
     const seg = new URL(location.href).pathname.split("/").filter(Boolean);
-    return seg.length >= 2 ? seg[0] + "/" + seg[1] : null;
+    return seg.length >= 2 ? seg.slice(0, 3).join("/") : null;
   } catch { return null; }
 }
 
@@ -466,8 +467,8 @@ if (IS_TOUCH && document.body) {
 }
 
 // ================= Auto-save =================
-// Saves automatically when you move to a different scene (e.g. 3rd day -> 4th day).
-// It never runs on page load, so loading an old save doesn't overwrite the auto-save.
+// Saves automatically when the part changes (e.g. 3rd day part 0 -> part 1, or 3rd day -> 4th day).
+// Page changes inside a part don't count. It never runs on page load, so loading an old save doesn't overwrite the auto-save.
 let lastScene = sceneKey();
 
 function watchScene() {
