@@ -1,10 +1,10 @@
 // ==UserScript==
-// @updateURL    https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
-// @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      1.9
+// @version      2.1
 // @description  S = save menu, L = load menu (6 slots). Shows a route guide on choice screens (H hides it).
+// @updateURL    https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
+// @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -280,6 +280,14 @@ const GUIDES = {
       ["Top Continue", "Heaven's Feel"],
       ["Bottom Continue", "Fate"]
     ]
+  },
+  "/fate/4th-day/4#page23": {
+    title: "Choice",
+    rows: [
+      ["All right. Let's cooperate", "Fate route"],
+      ["I'm sorry but I can't", "UBW route"]
+    ],
+    note: "Going to UBW from here means you will have missed the Day 3 UBW events."
   }
 };
 
