@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      2.7
-// @description  S = save menu, L = load menu (6 slots + auto-save). Route guide on choice screens (H hides it), intro video when idle.
+// @version      2.9
+// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, route guide on choice screens (H hides it), intro video when idle.
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -25,8 +25,8 @@ const GUIDE_KEY = "h"; // hides/shows the route guide
 const SLOTS = 6;
 
 // Intro video (pops up when the page stays unchanged for a while)
-const IDLE_FIRST_MS = 10000;  // page unchanged for this long -> a video's first showing
-const IDLE_REPEAT_MS = 15000; // once a video was watched, this long before it shows again
+const IDLE_FIRST_MS = 25000;  // page unchanged for this long -> a video's first showing
+const IDLE_REPEAT_MS = 40000; // once a video was watched, this long before it shows again
 const CLOSE_WHEN_ENDED = true; // close the window by itself when the video finishes
 const VIDEO_BASE = "https://dalavz.github.io/FSNBrowserPlus/videos/";
 const VIDEOS = {
@@ -347,12 +347,13 @@ function renderMenu(slots, auto, message) {
   }
 
   // ----- footer buttons (click only) -----
-  const foot = el("div", { display: "flex", gap: "6px", marginTop: "10px" });
-  const chip = { flex: "1", fontWeight: "normal", fontSize: "12px", padding: "7px 4px" };
+  const foot = el("div", { display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "10px" });
+  const chip = { flex: "1 1 45%", fontWeight: "normal", fontSize: "12px", padding: "7px 4px" };
   const chipBg = "rgba(255,255,255,0.12)";
   foot.appendChild(button("Export code", chipBg, () => { view = "export"; refresh(); }, chip));
   foot.appendChild(button("Import code", chipBg, () => { view = "import"; importDraft = ""; refresh(); }, chip));
   foot.appendChild(button(guideHidden ? "Show guide" : "Hide guide", chipBg, () => { toggleGuide(true); refresh(); }, chip));
+  foot.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
   menu.appendChild(foot);
   if (!IS_TOUCH) {
     menu.appendChild(el("div", { marginTop: "8px", color: "#888", fontSize: "11px" }, "Esc to close"));
@@ -714,7 +715,7 @@ function watchScene() {
 }
 
 // ================= Intro video =================
-// If the page stays unchanged for a while (10 s the first time, 15 s once a video was
+// If the page stays unchanged for a while (25 s the first time, 40 s once a video was
 // watched), a big window plays the intro video of the current route (the main page plays
 // the Fate one). The countdown restarts after the window closes. No controls: just an X (or Esc) to close it.
 let videoBox = null;     // full-screen backdrop while a video is open
@@ -867,6 +868,85 @@ window.addEventListener("resize", layoutVideo);
 window.addEventListener("orientationchange", layoutVideo);
 document.addEventListener("visibilitychange", () => { idleSince = Date.now(); });
 
+// ================= Position display (top left) =================
+// A faint, always-visible box that shows Route / Scene / Part / Page and updates as you move.
+// The route guide sits under it (on phones the guide moves to the bottom right).
+let stackBox = null;
+let hudBox = null;
+let hudHidden = false;
+let hudReady = false;
+let lastHudKey = null;
+
+function getStack() {
+  if (!stackBox || !stackBox.isConnected) {
+    stackBox = el("div", {
+      position: "fixed", top: "16px", left: "16px", zIndex: 2147483646,
+      display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "12px",
+      maxWidth: "calc(100vw - 32px)", pointerEvents: "none"
+    });
+    document.body.appendChild(stackBox);
+  }
+  return stackBox;
+}
+
+function fillHud() {
+  hudBox.textContent = "";
+  const segs = location.pathname.split("/").filter(Boolean);
+  if (segs.length === 0) {
+    hudBox.appendChild(el("span", { fontWeight: "bold" }, "Main menu"));
+  } else {
+    const p = parseUrl(location.href);
+    const grid = el("div", { display: "grid", gridTemplateColumns: "auto auto auto auto", columnGap: "12px", rowGap: "1px" });
+    ["Route", "Scene", "Part", "Page"].forEach((h) => grid.appendChild(el("span", {
+      fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.5px", color: "rgba(255,255,255,0.6)"
+    }, h)));
+    [p.route, p.scene, p.part, p.page].forEach((v) => grid.appendChild(el("span", {}, v)));
+    hudBox.appendChild(grid);
+  }
+  const x = el("span", {
+    cursor: "pointer", padding: "4px 6px", fontSize: "13px", color: "rgba(255,255,255,0.7)",
+    pointerEvents: "auto", alignSelf: "flex-start"
+  }, "\u2715");
+  x.addEventListener("click", () => toggleHud());
+  hudBox.appendChild(x);
+}
+
+function updateHud(force) {
+  if (!hudReady || !document.body) return;
+  if (hudHidden) {
+    if (hudBox) { hudBox.remove(); hudBox = null; }
+    lastHudKey = null;
+    return;
+  }
+  if (hudBox && !hudBox.isConnected) hudBox = null;
+  const key = location.pathname + location.hash;
+  if (!force && key === lastHudKey && hudBox) return;
+  lastHudKey = key;
+  if (!hudBox) {
+    hudBox = el("div", {
+      display: "flex", alignItems: "center", gap: "8px", background: "rgba(0,0,0,0.28)",
+      color: "#fff", padding: "6px 6px 6px 10px", borderRadius: "6px",
+      font: "13px sans-serif", textShadow: "0 0 3px rgba(0,0,0,0.8)", pointerEvents: "none"
+    });
+    swallowEvents(hudBox);
+    const stack = getStack();
+    stack.insertBefore(hudBox, stack.firstChild);
+  }
+  fillHud();
+}
+
+function toggleHud() {
+  hudHidden = !hudHidden;
+  store.set("fsnHudHidden", hudHidden);
+  updateHud(true);
+}
+
+store.get("fsnHudHidden", false, (v) => {
+  hudHidden = !!v;
+  hudReady = true;
+  updateHud(true);
+});
+
 // ================= Route guide =================
 // Key = path + #hash of the page where a choice appears.
 const GUIDES = {
@@ -913,7 +993,6 @@ function updateGuide(force) {
   if (!g || guideHidden || !document.body) return;
 
   guideBox = el("div", {
-    position: "fixed", top: "16px", left: "16px", zIndex: 2147483646,
     background: "rgba(15,15,15,0.94)", color: "#fff", padding: "12px 14px",
     font: "16px sans-serif", maxWidth: "min(300px, 80vw)", boxSizing: "border-box",
     borderRadius: "8px", boxShadow: "0 4px 18px rgba(0,0,0,0.5)",
@@ -933,7 +1012,16 @@ function updateGuide(force) {
     guideBox.appendChild(el("div", { marginTop: "8px", color: "#888", fontSize: "12px" },
       GUIDE_KEY.toUpperCase() + " to hide the guide"));
   }
-  document.body.appendChild(guideBox);
+  if (IS_TOUCH) {
+    // phones: bottom right, away from the position display
+    Object.assign(guideBox.style, {
+      position: "fixed", right: "16px", zIndex: 2147483646,
+      bottom: "calc(16px + env(safe-area-inset-bottom, 0px))"
+    });
+    document.body.appendChild(guideBox);
+  } else {
+    getStack().appendChild(guideBox); // top left, under the position display
+  }
 }
 
 function toggleGuide(silent) {
@@ -949,6 +1037,7 @@ store.get("fsnGuideHidden", false, (v) => {
 });
 
 function tick() {
+  updateHud(false);
   updateGuide(false); // the site is a single-page app, so we poll for changes
   watchScene();
   tickIdle();
