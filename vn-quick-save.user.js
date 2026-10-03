@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.3
+// @version      3.4
 // @description  S = save menu, L = load menu (6 slots + auto-save). Position display, route guide on choice screens (H hides it), intro videos (when idle, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -776,10 +776,10 @@ store.get("fsnVideosSeen", {}, (v) => {
 });
 
 // Which route's video belongs to the current page: "fate", "ubw", "hf" or null.
+// Works inside scenes (/ubw/6th-day/13) and on the main menu (/ = Fate, /fate, /ubw, /hf).
 function routeKind() {
   const seg = location.pathname.split("/").filter(Boolean);
-  if (seg.length === 0) return "fate"; // the main page plays the Fate intro
-  if (seg.length < 2) return null;
+  if (seg.length === 0) return "fate"; // the plain main page plays the Fate intro
   const r = seg[0].toLowerCase();
   if (r === "fate") return "fate";
   if (/ubw|unlimited|blade/.test(r)) return "ubw";
@@ -1018,8 +1018,10 @@ function getStack() {
 function fillHud() {
   hudBox.textContent = "";
   const segs = location.pathname.split("/").filter(Boolean);
-  if (segs.length === 0) {
-    hudBox.appendChild(el("span", { fontWeight: "bold" }, "Main menu"));
+  if (segs.length < 2) {
+    // main menu (the flowchart pages /, /fate, /ubw, /hf)
+    hudBox.appendChild(el("span", { fontWeight: "bold" },
+      segs.length === 0 ? "Main menu" : "Main menu \u00b7 " + titleCase(segs[0])));
   } else {
     const p = parseUrl(location.href);
     const grid = el("div", {
