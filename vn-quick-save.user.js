@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      2.4
-// @description  S = save menu, L = load menu (6 slots + auto-save). Shows a route guide on choice screens (H hides it).
+// @version      2.7
+// @description  S = save menu, L = load menu (6 slots + auto-save). Route guide on choice screens (H hides it), intro video when idle.
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -23,6 +23,17 @@ const SAVE_KEY = "s";
 const LOAD_KEY = "l";
 const GUIDE_KEY = "h"; // hides/shows the route guide
 const SLOTS = 6;
+
+// Intro video (pops up when the page stays unchanged for a while)
+const IDLE_FIRST_MS = 10000;  // page unchanged for this long -> a video's first showing
+const IDLE_REPEAT_MS = 15000; // once a video was watched, this long before it shows again
+const CLOSE_WHEN_ENDED = true; // close the window by itself when the video finishes
+const VIDEO_BASE = "https://dalavz.github.io/FSNBrowserPlus/videos/";
+const VIDEOS = {
+  fate: VIDEO_BASE + "fate.mp4",
+  ubw: VIDEO_BASE + "ubw.mp4",
+  hf: VIDEO_BASE + "heavens-feel.mp4"
+};
 // ----------------------------------------
 
 const ORIGIN = location.origin;
@@ -37,7 +48,9 @@ const THEMES = {
 let menu = null;
 let mode = null;          // "save" | "load" | null
 let pending = null;       // slot index waiting for overwrite confirmation
-let pendingImport = null; // parsed save file waiting for import confirmation
+let pendingImport = null; // decoded save code waiting for import confirmation
+let view = null;          // null | "export" | "import" (the save-code screens)
+let importDraft = "";     // text typed or pasted in the import box
 
 // ---------- small helpers ----------
 function el(tag, styles, text) {
@@ -143,12 +156,24 @@ function closeMenu() {
   mode = null;
   pending = null;
   pendingImport = null;
+  view = null;
+  importDraft = "";
+}
+
+// Saving is only allowed inside a scene (not on the main menu or other non-scene pages).
+function canSave() {
+  return sceneKey() !== null;
 }
 
 function openMenu(newMode) {
+  if (newMode === "save" && !canSave()) {
+    toast("Saving is disabled on the main menu.");
+    return;
+  }
   mode = newMode;
   pending = null;
   pendingImport = null;
+  view = null;
   refresh();
 }
 
@@ -174,6 +199,7 @@ function makeRow(label, slot, extra, onClick) {
 
 function renderMenu(slots, auto, message) {
   if (menu) menu.remove();
+  if (mode === "save" && !canSave()) mode = "load";
   const theme = THEMES[mode] || THEMES.save;
   menu = el("div", {
     position: "fixed", top: "16px", right: "16px", zIndex: 2147483647,
@@ -207,7 +233,7 @@ function renderMenu(slots, auto, message) {
     const n = pendingImport.slots.filter(Boolean).length;
     menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "8px", color: theme.title }, "Import saves?"));
     menu.appendChild(el("div", { marginBottom: "6px" },
-      "The file has " + n + " slot save" + (n === 1 ? "" : "s") + (pendingImport.auto ? " and an auto-save." : ".")));
+      "The code has " + n + " slot save" + (n === 1 ? "" : "s") + (pendingImport.auto ? " and an auto-save." : ".")));
     menu.appendChild(el("div", { color: "#ffb35a", fontSize: "12px", marginBottom: "8px" },
       "This replaces ALL your current saves, including the auto-save."));
     const btns = el("div", { display: "flex", gap: "8px" });
@@ -218,18 +244,64 @@ function renderMenu(slots, auto, message) {
     return;
   }
 
+  // ----- export code screen -----
+  if (view === "export") {
+    const code = encodeSaves(slots, auto);
+    menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "6px", color: theme.title }, "Your save code"));
+    menu.appendChild(el("div", { fontSize: "12px", color: "#aaa", marginBottom: "8px" },
+      "Copy it, then paste it into \"Import code\" on another device. It holds your auto-save and slots 1-" + SLOTS + "."));
+    const ta = codeBox(code, true);
+    menu.appendChild(ta);
+    if (message) menu.appendChild(el("div", { marginTop: "6px", color: "#ffb35a", fontSize: "12px" }, message));
+    const btns = el("div", { display: "flex", gap: "8px", marginTop: "8px" });
+    btns.appendChild(button("Copy", theme.border, () => {
+      copyText(code, ta, (ok) => refresh(ok ? "Copied \u2714" : "Couldn't copy. Select the code and copy it manually."));
+    }, { flex: "1" }));
+    btns.appendChild(button("Back", "#444", () => { view = null; refresh(); }, { flex: "1" }));
+    menu.appendChild(btns);
+    document.body.appendChild(menu);
+    return;
+  }
+
+  // ----- import code screen -----
+  if (view === "import") {
+    menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "6px", color: theme.title }, "Import a save code"));
+    menu.appendChild(el("div", { fontSize: "12px", color: "#aaa", marginBottom: "8px" },
+      "Paste a code you exported from this script."));
+    const ta = codeBox(importDraft, false);
+    ta.placeholder = CODE_PREFIX + "...";
+    ta.addEventListener("input", () => { importDraft = ta.value; });
+    menu.appendChild(ta);
+    if (message) menu.appendChild(el("div", { marginTop: "6px", color: "#ffb35a", fontSize: "12px" }, message));
+    const btns = el("div", { display: "flex", gap: "8px", marginTop: "8px" });
+    btns.appendChild(button("Import", theme.border, () => {
+      importDraft = ta.value;
+      const data = decodeSaves(importDraft);
+      if (!data) { refresh("That code isn't valid. Make sure it was copied completely."); return; }
+      pendingImport = data;
+      refresh();
+    }, { flex: "1" }));
+    btns.appendChild(button("Back", "#444", () => { view = null; refresh(); }, { flex: "1" }));
+    menu.appendChild(btns);
+    document.body.appendChild(menu);
+    if (!IS_TOUCH) ta.focus();
+    return;
+  }
+
   // ----- top bar: Save / Load tabs + close -----
   const bar = el("div", { display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" });
   ["save", "load"].forEach((m) => {
     const active = m === mode;
+    const disabled = m === "save" && !canSave();
     const tab = el("div", {
-      padding: "4px 14px", borderRadius: "14px", cursor: "pointer", fontWeight: "bold",
+      padding: "4px 14px", borderRadius: "14px", cursor: disabled ? "default" : "pointer", fontWeight: "bold",
       background: active ? THEMES[m].border : "rgba(255,255,255,0.08)",
-      color: active ? "#fff" : "#aaa"
+      color: active ? "#fff" : "#aaa", opacity: disabled ? "0.35" : "1"
     }, m === "save" ? "Save" : "Load");
+    if (disabled) tab.title = "Saving is disabled on the main menu";
     tab.addEventListener("click", () => {
-      if (m === mode) return;
-      mode = m; pending = null; pendingImport = null;
+      if (disabled || m === mode) return;
+      mode = m; pending = null; pendingImport = null; view = null;
       refresh();
     });
     bar.appendChild(tab);
@@ -278,8 +350,8 @@ function renderMenu(slots, auto, message) {
   const foot = el("div", { display: "flex", gap: "6px", marginTop: "10px" });
   const chip = { flex: "1", fontWeight: "normal", fontSize: "12px", padding: "7px 4px" };
   const chipBg = "rgba(255,255,255,0.12)";
-  foot.appendChild(button("Export", chipBg, exportSaves, chip));
-  foot.appendChild(button("Import", chipBg, importSaves, chip));
+  foot.appendChild(button("Export code", chipBg, () => { view = "export"; refresh(); }, chip));
+  foot.appendChild(button("Import code", chipBg, () => { view = "import"; importDraft = ""; refresh(); }, chip));
   foot.appendChild(button(guideHidden ? "Show guide" : "Hide guide", chipBg, () => { toggleGuide(true); refresh(); }, chip));
   menu.appendChild(foot);
   if (!IS_TOUCH) {
@@ -290,6 +362,11 @@ function renderMenu(slots, auto, message) {
 
 // ---------- save / load actions ----------
 function doSave(slots, i) {
+  if (!canSave()) {
+    closeMenu();
+    toast("Saving is disabled on the main menu.");
+    return;
+  }
   slots[i] = { url: location.href, time: Date.now() };
   store.set("fsnSlots", slots);
   closeMenu();
@@ -349,60 +426,201 @@ function cancelConfirm() {
   refresh();
 }
 
-// ---------- export / import ----------
-function exportSaves() {
-  getData((slots, auto) => {
-    const data = {
-      app: "fsn-quick-save", version: 2,
-      exported: new Date().toISOString(), slots, auto
-    };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    const href = URL.createObjectURL(blob);
-    a.href = href;
-    a.download = "fsn-saves-" + new Date().toISOString().slice(0, 10) + ".json";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(href), 5000);
-    refresh("Saves exported. Check your downloads.");
-  });
+// ---------- save codes (export / import) ----------
+// A code looks like FSN1-<scrambled text>. It holds the auto-save + slots 1..SLOTS as
+// compact numbers (route, day, part, page), plus a checksum so typos/half-copies are rejected.
+// Only the part of each link after the domain is stored; the site's own address is added on import.
+const CODE_PREFIX = "FSN1-";
+const ENC = new TextEncoder();
+const DEC = new TextDecoder("utf-8", { fatal: true });
+
+let crcTable = null;
+function crc32(bytes) {
+  if (!crcTable) {
+    crcTable = [];
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable.push(c >>> 0);
+    }
+  }
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
 }
 
-function parseSaveFile(text) {
-  let d;
-  try { d = JSON.parse(text); } catch { return null; }
-  if (!d || d.app !== "fsn-quick-save" || !Array.isArray(d.slots)) return null;
-  const clean = (s) => (s && typeof s.url === "string" && isSafeUrl(s.url))
-    ? { url: s.url, time: Number(s.time) || 0 }
-    : null;
-  const slots = d.slots.slice(0, SLOTS).map(clean);
-  while (slots.length < SLOTS) slots.push(null);
-  return { slots, auto: clean(d.auto) };
+function ordinalDay(n) {
+  const r = n % 100;
+  const suffix = r >= 11 && r <= 13 ? "th" : n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th";
+  return n + suffix + "-day";
 }
 
-function importSaves() {
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = ".json,application/json";
-  input.style.display = "none";
-  input.addEventListener("change", () => {
-    const f = input.files && input.files[0];
-    input.remove();
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const data = parseSaveFile(String(reader.result));
-      if (!data) { refresh("That file isn't a valid save file."); return; }
-      pendingImport = data;
-      pending = null;
-      refresh();
-    };
-    reader.onerror = () => refresh("Couldn't read that file.");
-    reader.readAsText(f);
+function pushVarint(out, n) {
+  while (n >= 128) { out.push((n % 128) | 128); n = Math.floor(n / 128); }
+  out.push(n);
+}
+
+function pushString(out, str) {
+  const b = ENC.encode(str);
+  pushVarint(out, b.length);
+  for (let i = 0; i < b.length; i++) out.push(b[i]);
+}
+
+function plainNumber(str) {
+  const n = parseInt(str, 10);
+  return String(n) === str && n < 268435456 ? n : null;
+}
+
+function encodeEntry(out, url) {
+  const u = new URL(url);
+  const path = u.pathname + u.search + u.hash;
+  const m = path.match(/^\/([^\/#?]+)\/([^\/#?]+)\/(\d+)#page(\d+)$/);
+  const part = m ? plainNumber(m[3]) : null;
+  const page = m ? plainNumber(m[4]) : null;
+  if (m && part !== null && page !== null) {
+    const route = m[1], scene = m[2];
+    const dm = scene.match(/^(\d+)(?:st|nd|rd|th)-day$/);
+    const dayNum = dm ? plainNumber(dm[1]) : null;
+    const day = dayNum !== null && ordinalDay(dayNum) === scene ? dayNum : null;
+    let flags = 0;
+    if (route !== "fate") flags |= 2;
+    if (day === null) flags |= 4;
+    out.push(flags);
+    if (flags & 2) pushString(out, route);
+    if (day === null) pushString(out, scene); else pushVarint(out, day);
+    pushVarint(out, part);
+    pushVarint(out, page);
+  } else {
+    out.push(1);
+    pushString(out, path);
+  }
+}
+
+function toB64Url(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fromB64Url(str) {
+  if (!/^[A-Za-z0-9_-]+$/.test(str)) return null;
+  let s = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  const bytes = [];
+  for (let i = 0; i < bin.length; i++) bytes.push(bin.charCodeAt(i));
+  return bytes;
+}
+
+function encodeSaves(slots, auto) {
+  const entries = [auto];
+  for (let i = 0; i < SLOTS; i++) entries.push(slots[i] || null);
+  const mask = new Array(Math.ceil(entries.length / 8)).fill(0);
+  const body = [];
+  entries.forEach((e, i) => {
+    if (e && isSafeUrl(e.url)) {
+      mask[i >> 3] |= 1 << (i & 7);
+      encodeEntry(body, e.url);
+    }
   });
-  document.body.appendChild(input);
-  input.click();
+  const payload = mask.concat(body);
+  const c = crc32(payload);
+  return CODE_PREFIX + toB64Url(payload.concat([c & 255, (c >>> 8) & 255, (c >>> 16) & 255]));
+}
+
+// Returns { slots, auto } or null if the code is damaged or not a save code.
+function decodeSaves(text) {
+  try {
+    const t = String(text).replace(/\s+/g, "");
+    if (!t.startsWith(CODE_PREFIX)) return null;
+    const bytes = fromB64Url(t.slice(CODE_PREFIX.length));
+    const maskBytes = Math.ceil((SLOTS + 1) / 8);
+    if (!bytes || bytes.length < maskBytes + 3) return null;
+    const payload = bytes.slice(0, bytes.length - 3);
+    const n = bytes.length;
+    const got = bytes[n - 3] | (bytes[n - 2] << 8) | (bytes[n - 1] << 16);
+    if ((crc32(payload) & 0xffffff) !== got) return null;
+
+    let pos = maskBytes;
+    const readByte = () => {
+      if (pos >= payload.length) throw new Error("end");
+      return payload[pos++];
+    };
+    const readVarint = () => {
+      let v = 0, mul = 1, b;
+      do {
+        b = readByte();
+        v += (b & 127) * mul;
+        mul *= 128;
+        if (mul > 34359738368) throw new Error("big");
+      } while (b & 128);
+      return v;
+    };
+    const readString = () => {
+      const len = readVarint();
+      if (pos + len > payload.length) throw new Error("end");
+      const str = DEC.decode(Uint8Array.from(payload.slice(pos, pos + len)));
+      pos += len;
+      return str;
+    };
+
+    for (let i = SLOTS + 1; i < maskBytes * 8; i++) {
+      if (payload[i >> 3] & (1 << (i & 7))) return null;
+    }
+    const out = [];
+    for (let i = 0; i <= SLOTS; i++) {
+      if (!(payload[i >> 3] & (1 << (i & 7)))) { out.push(null); continue; }
+      const f = readByte();
+      if (f & ~7) return null;
+      let path;
+      if (f & 1) {
+        path = readString();
+      } else {
+        const route = f & 2 ? readString() : "fate";
+        const scene = f & 4 ? readString() : ordinalDay(readVarint());
+        const part = readVarint();
+        const page = readVarint();
+        path = "/" + route + "/" + scene + "/" + part + "#page" + page;
+      }
+      if (path[0] !== "/") return null;
+      const url = ORIGIN + path;
+      if (!isSafeUrl(url)) return null;
+      out.push({ url, time: 0 });
+    }
+    if (pos !== payload.length) return null;
+    return { auto: out[0], slots: out.slice(1) };
+  } catch { return null; }
+}
+
+function codeBox(value, readOnly) {
+  const ta = el("textarea", {
+    width: "100%", boxSizing: "border-box", height: "92px", resize: "none",
+    background: "#111", color: "#fff", border: "1px solid #555", borderRadius: "4px",
+    padding: "6px", font: "13px monospace"
+  });
+  ta.value = value;
+  ta.readOnly = !!readOnly;
+  ta.spellcheck = false;
+  ta.autocapitalize = "off";
+  ta.setAttribute("autocomplete", "off");
+  // typing in the box must not trigger the game's own key shortcuts
+  ["keydown", "keyup", "keypress"].forEach((t) => ta.addEventListener(t, (ev) => ev.stopPropagation()));
+  if (readOnly) ta.addEventListener("focus", () => ta.select());
+  return ta;
+}
+
+function copyText(text, ta, done) {
+  const fallback = () => {
+    try {
+      ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+      done(!!document.execCommand("copy"));
+    } catch { done(false); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => done(true), fallback);
+  } else {
+    fallback();
+  }
 }
 
 function applyImport() {
@@ -421,7 +639,19 @@ document.addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase();
   const swallow = () => { e.preventDefault(); e.stopPropagation(); };
 
+  if (videoBox) {
+    // while the intro video is open, keys don't reach the game; Esc closes it
+    swallow();
+    if (key === "escape") closeVideo();
+    return;
+  }
+
   if (menu) {
+    if (view && pending === null && !pendingImport) {
+      // on the save-code screens, typing goes to the text box; Esc goes back
+      if (key === "escape") { swallow(); view = null; refresh(); }
+      return;
+    }
     if (pending !== null || pendingImport) {
       if (key === "y" || key === "enter") { swallow(); confirmYes(); }
       else if (key === "n" || key === "escape") { swallow(); cancelConfirm(); }
@@ -482,6 +712,160 @@ function watchScene() {
     }
   }, 500);
 }
+
+// ================= Intro video =================
+// If the page stays unchanged for a while (10 s the first time, 15 s once a video was
+// watched), a big window plays the intro video of the current route (the main page plays
+// the Fate one). The countdown restarts after the window closes. No controls: just an X (or Esc) to close it.
+let videoBox = null;     // full-screen backdrop while a video is open
+let videoInner = null;   // the video window itself
+let videoEl = null;
+let videoRatio = 16 / 9;
+let seenRoutes = {};
+const failedRoutes = {};
+let idleKey = null;
+let idleSince = Date.now();
+
+store.get("fsnVideosSeen", {}, (v) => {
+  seenRoutes = v && typeof v === "object" ? v : {};
+});
+
+// Which route's video belongs to the current page: "fate", "ubw", "hf" or null.
+function routeKind() {
+  const seg = location.pathname.split("/").filter(Boolean);
+  if (seg.length === 0) return "fate"; // the main page plays the Fate intro
+  if (seg.length < 2) return null;
+  const r = seg[0].toLowerCase();
+  if (r === "fate") return "fate";
+  if (/ubw|unlimited|blade/.test(r)) return "ubw";
+  if (/heaven|hf|feel/.test(r)) return "hf";
+  return null;
+}
+
+function layoutVideo() {
+  if (!videoBox) return;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const rotate = IS_TOUCH && vh > vw; // phone held upright: show the video sideways
+  const availW = (rotate ? vh : vw) * 0.94;
+  const availH = (rotate ? vw : vh) * 0.94;
+  let w = availW, h = w / videoRatio;
+  if (h > availH) { h = availH; w = h * videoRatio; }
+  Object.assign(videoInner.style, {
+    width: Math.round(w) + "px", height: Math.round(h) + "px",
+    transform: "translate(-50%, -50%)" + (rotate ? " rotate(90deg)" : "")
+  });
+}
+
+function closeVideo() {
+  if (!videoBox) return;
+  try { videoEl.pause(); videoEl.removeAttribute("src"); videoEl.load(); } catch (err) { /* ignore */ }
+  videoBox.remove();
+  videoBox = null; videoInner = null; videoEl = null;
+  idleSince = Date.now(); // the countdown starts over after the window closes
+}
+
+function openVideo(kind) {
+  const url = VIDEOS[kind];
+  if (!url || videoBox) return;
+
+  videoBox = el("div", {
+    position: "fixed", top: "0", left: "0", right: "0", bottom: "0",
+    zIndex: 2147483647, background: "rgba(0,0,0,0.6)"
+  });
+  swallowEvents(videoBox);
+  videoInner = el("div", {
+    position: "absolute", top: "50%", left: "50%", background: "#000",
+    borderRadius: "8px", overflow: "hidden"
+  });
+
+  const v = document.createElement("video");
+  videoEl = v;
+  Object.assign(v.style, { width: "100%", height: "100%", display: "block", objectFit: "contain", background: "#000" });
+  v.playsInline = true;
+  v.setAttribute("playsinline", "");
+  v.setAttribute("webkit-playsinline", "");
+  v.controls = false;
+  v.disablePictureInPicture = true;
+  v.preload = "auto";
+  v.addEventListener("contextmenu", (ev) => ev.preventDefault());
+  videoRatio = 16 / 9;
+
+  v.addEventListener("loadedmetadata", () => {
+    if (v.videoWidth && v.videoHeight) videoRatio = v.videoWidth / v.videoHeight;
+    layoutVideo();
+  });
+  v.addEventListener("playing", () => {
+    if (!seenRoutes[kind]) {
+      seenRoutes[kind] = true;
+      store.set("fsnVideosSeen", seenRoutes);
+    }
+  });
+  v.addEventListener("ended", () => { if (CLOSE_WHEN_ENDED && videoEl === v) closeVideo(); });
+  v.addEventListener("error", () => {
+    if (videoEl !== v) return;
+    failedRoutes[kind] = true;
+    closeVideo();
+    toast("Intro video couldn't be loaded.");
+  });
+
+  // the X button
+  const x = el("div", {
+    position: "absolute", top: "8px", right: "8px", width: "36px", height: "36px",
+    borderRadius: "50%", background: "rgba(0,0,0,0.55)", color: "#fff", font: "18px sans-serif",
+    display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 2
+  }, "\u2715");
+  x.addEventListener("click", closeVideo);
+
+  videoInner.appendChild(v);
+  videoInner.appendChild(x);
+  videoBox.appendChild(videoInner);
+  document.body.appendChild(videoBox);
+  layoutVideo();
+
+  v.src = url;
+  const started = v.play();
+  if (started && started.catch) {
+    // sound autoplay can be blocked (mostly on phones): start muted, tap the video for sound
+    started.catch(() => {
+      if (videoEl !== v) return;
+      v.muted = true;
+      const again = v.play();
+      if (again && again.catch) again.catch(() => {});
+      const hint = el("div", {
+        position: "absolute", bottom: "8px", left: "50%", transform: "translateX(-50%)",
+        background: "rgba(0,0,0,0.55)", color: "#fff", font: "12px sans-serif",
+        padding: "4px 10px", borderRadius: "10px", pointerEvents: "none"
+      }, "Tap for sound");
+      videoInner.appendChild(hint);
+      v.addEventListener("click", () => {
+        v.muted = false;
+        hint.remove();
+        if (v.paused) v.play().catch(() => {});
+      });
+    });
+  }
+}
+
+function tickIdle() {
+  const key = location.pathname + location.hash;
+  if (key !== idleKey) {          // the page changed: restart the countdown
+    idleKey = key;
+    idleSince = Date.now();
+    if (videoBox) closeVideo();
+    return;
+  }
+  if (videoBox) return;
+  if (menu || document.visibilityState !== "visible") { idleSince = Date.now(); return; }
+  const kind = routeKind();
+  if (!kind || failedRoutes[kind]) return;
+  const wait = seenRoutes[kind] ? IDLE_REPEAT_MS : IDLE_FIRST_MS;
+  if (Date.now() - idleSince < wait) return;
+  openVideo(kind);
+}
+
+window.addEventListener("resize", layoutVideo);
+window.addEventListener("orientationchange", layoutVideo);
+document.addEventListener("visibilitychange", () => { idleSince = Date.now(); });
 
 // ================= Route guide =================
 // Key = path + #hash of the page where a choice appears.
@@ -567,6 +951,7 @@ store.get("fsnGuideHidden", false, (v) => {
 function tick() {
   updateGuide(false); // the site is a single-page app, so we poll for changes
   watchScene();
+  tickIdle();
 }
 window.addEventListener("hashchange", tick);
 window.addEventListener("popstate", tick);
