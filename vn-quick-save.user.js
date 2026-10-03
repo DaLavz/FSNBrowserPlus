@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.1
-// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, route guide on choice screens (H hides it), intro video when idle.
+// @version      3.3
+// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, route guide on choice screens (H hides it), intro videos (when idle, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -641,12 +641,7 @@ document.addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase();
   const swallow = () => { e.preventDefault(); e.stopPropagation(); };
 
-  if (videoBox) {
-    // while the intro video is open, keys don't reach the game; Esc closes it
-    swallow();
-    if (key === "escape") closeVideo();
-    return;
-  }
+  // (while an intro video is open, blockKeysWhileVideo() below handles the keys first)
 
   if (menu) {
     if (view && pending === null && !pendingImport) {
@@ -806,11 +801,57 @@ function layoutVideo() {
   });
 }
 
+// ----- no scrolling or key presses reaching the game while a video is open -----
+let scrollLock = null;
+
+function lockScroll() {
+  if (scrollLock || !document.body) return;
+  const html = document.documentElement, body = document.body;
+  const sbw = window.innerWidth - html.clientWidth; // width of a visible scrollbar, if any
+  scrollLock = {
+    htmlOverflow: html.style.overflow, htmlOverscroll: html.style.overscrollBehavior,
+    bodyOverflow: body.style.overflow, bodyPadding: body.style.paddingRight
+  };
+  html.style.overflow = "hidden";
+  html.style.overscrollBehavior = "none";
+  body.style.overflow = "hidden";
+  if (sbw > 0 && sbw < 60) { // keep the page from jumping sideways when the scrollbar disappears
+    body.style.paddingRight = ((parseFloat(getComputedStyle(body).paddingRight) || 0) + sbw) + "px";
+  }
+}
+
+function unlockScroll() {
+  if (!scrollLock) return;
+  const html = document.documentElement, body = document.body;
+  html.style.overflow = scrollLock.htmlOverflow;
+  html.style.overscrollBehavior = scrollLock.htmlOverscroll;
+  body.style.overflow = scrollLock.bodyOverflow;
+  body.style.paddingRight = scrollLock.bodyPadding;
+  scrollLock = null;
+}
+
+// Mouse wheel / touch scrolling
+function stopScrollWhileVideo(e) { if (videoBox) e.preventDefault(); }
+window.addEventListener("wheel", stopScrollWhileVideo, { passive: false, capture: true });
+window.addEventListener("touchmove", stopScrollWhileVideo, { passive: false, capture: true });
+
+// Keyboard: arrows, space, page keys, etc. never reach the game or scroll the page.
+// Esc closes the video. Function keys (F5, F11, F12...) and Ctrl/Alt/Cmd shortcuts still work.
+function blockKeysWhileVideo(e) {
+  if (!videoBox) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || /^F\d+$/.test(e.key)) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (e.type === "keydown" && e.key === "Escape") closeVideo();
+}
+["keydown", "keyup", "keypress"].forEach((t) => window.addEventListener(t, blockKeysWhileVideo, true));
+
 function closeVideo() {
   if (!videoBox) return;
   try { videoEl.pause(); videoEl.removeAttribute("src"); videoEl.load(); } catch (err) { /* ignore */ }
   videoBox.remove();
   videoBox = null; videoInner = null; videoEl = null;
+  unlockScroll();
   restorePageAudio();     // the VN's music comes back
   idleSince = Date.now(); // the countdown starts over after the window closes
 }
@@ -824,6 +865,7 @@ function openVideo(kind) {
     zIndex: 2147483647, background: "rgba(0,0,0,0.6)"
   });
   swallowEvents(videoBox);
+  videoBox.addEventListener("mousedown", (ev) => { if (ev.button === 1) ev.preventDefault(); }); // no middle-click autoscroll
   videoInner = el("div", {
     position: "absolute", top: "50%", left: "50%", background: "#000",
     borderRadius: "8px", overflow: "hidden"
@@ -871,6 +913,7 @@ function openVideo(kind) {
   videoInner.appendChild(x);
   videoBox.appendChild(videoInner);
   document.body.appendChild(videoBox);
+  lockScroll();
   layoutVideo();
 
   const ducked = duckPageAudio();
@@ -915,6 +958,32 @@ function tickIdle() {
   const wait = seenRoutes[kind] ? IDLE_REPEAT_MS : IDLE_FIRST_MS;
   if (Date.now() - idleSince < wait) return;
   openVideo(kind);
+}
+
+// ----- openings that play by themselves when you arrive at a certain page (like the real game) -----
+// They play every time you get there, no matter how often. The page's #hash is ignored.
+const AUTO_VIDEOS = [
+  { path: "/fate/4th-day/0", kind: "fate" },
+  { path: "/ubw/6th-day/13", kind: "ubw" },
+  { path: "/hf/6th-day/0", kind: "hf" }
+];
+let lastPath = null;
+
+function currentPath() {
+  return location.pathname.replace(/\/+$/, "") || "/";
+}
+
+function checkArrival() {
+  const path = currentPath();
+  if (path === lastPath) return;
+  const firstCheck = lastPath === null;
+  lastPath = path;
+  const hit = AUTO_VIDEOS.find((a) => a.path === path);
+  if (!hit || failedRoutes[hit.kind]) return;
+  // opened straight into the middle of that part (e.g. loading a save): don't replay the opening
+  if (firstCheck && location.hash) return;
+  if (videoBox) closeVideo();
+  openVideo(hit.kind);
 }
 
 window.addEventListener("resize", layoutVideo);
@@ -1092,6 +1161,7 @@ function tick() {
   updateGuide(false); // the site is a single-page app, so we poll for changes
   watchScene();
   tickIdle();
+  checkArrival();
 }
 window.addEventListener("hashchange", tick);
 window.addEventListener("popstate", tick);
