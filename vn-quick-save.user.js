@@ -3,11 +3,12 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      2.9
+// @version      3.1
 // @description  S = save menu, L = load menu (6 slots + auto-save). Position display, route guide on choice screens (H hides it), intro video when idle.
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        unsafeWindow
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -718,6 +719,54 @@ function watchScene() {
 // If the page stays unchanged for a while (25 s the first time, 40 s once a video was
 // watched), a big window plays the intro video of the current route (the main page plays
 // the Fate one). The countdown restarts after the window closes. No controls: just an X (or Esc) to close it.
+// ----- silence the VN's own music while a video plays -----
+// Mutes <audio>/<video> elements of the page (including ones the page created with
+// new Audio() and played after this script loaded) and Howler.js if the page uses it.
+const PAGE_WIN = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
+const knownMedia = new Set(); // media elements the page has played
+let duckedMedia = new Map();  // element -> its muted state before we silenced it
+let howlerWasMuted = null;
+
+try {
+  const proto = PAGE_WIN.HTMLMediaElement && PAGE_WIN.HTMLMediaElement.prototype;
+  if (proto && !proto.__vnqsHooked) {
+    const origPlay = proto.play;
+    proto.play = function () {
+      try { knownMedia.add(this); } catch (err) { /* ignore */ }
+      return origPlay.apply(this, arguments);
+    };
+    proto.__vnqsHooked = true;
+  }
+} catch (err) { /* ignore */ }
+
+function duckPageAudio() {
+  let media = 0;
+  const all = new Set(knownMedia);
+  document.querySelectorAll("audio, video").forEach((m) => all.add(m));
+  all.forEach((m) => {
+    if (m === videoEl || duckedMedia.has(m)) return;
+    try { duckedMedia.set(m, m.muted); m.muted = true; media++; } catch (err) { /* ignore */ }
+  });
+  let howler = false;
+  try {
+    const H = PAGE_WIN.Howler;
+    if (H && typeof H.mute === "function") {
+      howler = true;
+      if (howlerWasMuted === null) { howlerWasMuted = !!H._muted; H.mute(true); }
+    }
+  } catch (err) { /* ignore */ }
+  return { media, howler };
+}
+
+function restorePageAudio() {
+  duckedMedia.forEach((was, m) => { try { m.muted = was; } catch (err) { /* ignore */ } });
+  duckedMedia = new Map();
+  try {
+    if (howlerWasMuted !== null) PAGE_WIN.Howler.mute(howlerWasMuted);
+  } catch (err) { /* ignore */ }
+  howlerWasMuted = null;
+}
+
 let videoBox = null;     // full-screen backdrop while a video is open
 let videoInner = null;   // the video window itself
 let videoEl = null;
@@ -762,6 +811,7 @@ function closeVideo() {
   try { videoEl.pause(); videoEl.removeAttribute("src"); videoEl.load(); } catch (err) { /* ignore */ }
   videoBox.remove();
   videoBox = null; videoInner = null; videoEl = null;
+  restorePageAudio();     // the VN's music comes back
   idleSince = Date.now(); // the countdown starts over after the window closes
 }
 
@@ -823,6 +873,9 @@ function openVideo(kind) {
   document.body.appendChild(videoBox);
   layoutVideo();
 
+  const ducked = duckPageAudio();
+  console.log("[VN script] page audio silenced: " + ducked.media + " media element(s), Howler " + (ducked.howler ? "found" : "not found"));
+
   v.src = url;
   const started = v.play();
   if (started && started.catch) {
@@ -855,7 +908,7 @@ function tickIdle() {
     if (videoBox) closeVideo();
     return;
   }
-  if (videoBox) return;
+  if (videoBox) { duckPageAudio(); return; } // also silences music that starts during the video
   if (menu || document.visibilityState !== "visible") { idleSince = Date.now(); return; }
   const kind = routeKind();
   if (!kind || failedRoutes[kind]) return;
@@ -870,7 +923,10 @@ document.addEventListener("visibilitychange", () => { idleSince = Date.now(); })
 
 // ================= Position display (top left) =================
 // A faint, always-visible box that shows Route / Scene / Part / Page and updates as you move.
-// The route guide sits under it (on phones the guide moves to the bottom right).
+// Computers: top left, with the route guide under it. Phones: bottom right (the menu button is
+// bottom left), with the route guide stacked above it.
+const HUD_FONT_PX = IS_TOUCH ? 13 : 17;  // size of the position display (bigger on computers)
+const HUD_LABEL_PX = IS_TOUCH ? 10 : 12; // size of the small Route/Scene/Part/Page labels
 let stackBox = null;
 let hudBox = null;
 let hudHidden = false;
@@ -879,11 +935,12 @@ let lastHudKey = null;
 
 function getStack() {
   if (!stackBox || !stackBox.isConnected) {
-    stackBox = el("div", {
-      position: "fixed", top: "16px", left: "16px", zIndex: 2147483646,
-      display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "12px",
+    stackBox = el("div", Object.assign({
+      position: "fixed", zIndex: 2147483646, display: "flex", gap: "12px",
       maxWidth: "calc(100vw - 32px)", pointerEvents: "none"
-    });
+    }, IS_TOUCH
+      ? { right: "16px", bottom: "calc(16px + env(safe-area-inset-bottom, 0px))", flexDirection: "column-reverse", alignItems: "flex-end" }
+      : { top: "16px", left: "16px", flexDirection: "column", alignItems: "flex-start" }));
     document.body.appendChild(stackBox);
   }
   return stackBox;
@@ -896,15 +953,18 @@ function fillHud() {
     hudBox.appendChild(el("span", { fontWeight: "bold" }, "Main menu"));
   } else {
     const p = parseUrl(location.href);
-    const grid = el("div", { display: "grid", gridTemplateColumns: "auto auto auto auto", columnGap: "12px", rowGap: "1px" });
+    const grid = el("div", {
+      display: "grid", gridTemplateColumns: "auto auto auto auto",
+      columnGap: Math.round(HUD_FONT_PX * 0.9) + "px", rowGap: "2px"
+    });
     ["Route", "Scene", "Part", "Page"].forEach((h) => grid.appendChild(el("span", {
-      fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.5px", color: "rgba(255,255,255,0.6)"
+      fontSize: HUD_LABEL_PX + "px", textTransform: "uppercase", letterSpacing: "0.5px", color: "rgba(255,255,255,0.6)"
     }, h)));
     [p.route, p.scene, p.part, p.page].forEach((v) => grid.appendChild(el("span", {}, v)));
     hudBox.appendChild(grid);
   }
   const x = el("span", {
-    cursor: "pointer", padding: "4px 6px", fontSize: "13px", color: "rgba(255,255,255,0.7)",
+    cursor: "pointer", padding: "4px 6px", fontSize: HUD_FONT_PX + "px", color: "rgba(255,255,255,0.7)",
     pointerEvents: "auto", alignSelf: "flex-start"
   }, "\u2715");
   x.addEventListener("click", () => toggleHud());
@@ -925,8 +985,8 @@ function updateHud(force) {
   if (!hudBox) {
     hudBox = el("div", {
       display: "flex", alignItems: "center", gap: "8px", background: "rgba(0,0,0,0.28)",
-      color: "#fff", padding: "6px 6px 6px 10px", borderRadius: "6px",
-      font: "13px sans-serif", textShadow: "0 0 3px rgba(0,0,0,0.8)", pointerEvents: "none"
+      color: "#fff", padding: Math.round(HUD_FONT_PX * 0.5) + "px 6px " + Math.round(HUD_FONT_PX * 0.5) + "px " + Math.round(HUD_FONT_PX * 0.8) + "px",
+      borderRadius: "6px", font: HUD_FONT_PX + "px sans-serif", textShadow: "0 0 3px rgba(0,0,0,0.8)", pointerEvents: "none"
     });
     swallowEvents(hudBox);
     const stack = getStack();
@@ -1012,16 +1072,7 @@ function updateGuide(force) {
     guideBox.appendChild(el("div", { marginTop: "8px", color: "#888", fontSize: "12px" },
       GUIDE_KEY.toUpperCase() + " to hide the guide"));
   }
-  if (IS_TOUCH) {
-    // phones: bottom right, away from the position display
-    Object.assign(guideBox.style, {
-      position: "fixed", right: "16px", zIndex: 2147483646,
-      bottom: "calc(16px + env(safe-area-inset-bottom, 0px))"
-    });
-    document.body.appendChild(guideBox);
-  } else {
-    getStack().appendChild(guideBox); // top left, under the position display
-  }
+  getStack().appendChild(guideBox); // under the position display (computers) / above it (phones)
 }
 
 function toggleGuide(silent) {
