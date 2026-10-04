@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.4
-// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, route guide on choice screens (H hides it), intro videos (when idle, and at key moments).
+// @version      3.5
+// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, hides the grayed-out text, route guide on choice screens (H hides it), intro videos (when idle, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -56,6 +56,7 @@ let importDraft = "";     // text typed or pasted in the import box
 // ---------- small helpers ----------
 function el(tag, styles, text) {
   const e = document.createElement(tag);
+  e.setAttribute("data-vnqs", "1"); // marks our own UI
   Object.assign(e.style, styles || {});
   if (text !== undefined) e.textContent = text;
   return e;
@@ -349,12 +350,13 @@ function renderMenu(slots, auto, message) {
 
   // ----- footer buttons (click only) -----
   const foot = el("div", { display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "10px" });
-  const chip = { flex: "1 1 45%", fontWeight: "normal", fontSize: "12px", padding: "7px 4px" };
+  const chip = { flex: "1 1 30%", fontWeight: "normal", fontSize: "12px", padding: "7px 4px" };
   const chipBg = "rgba(255,255,255,0.12)";
   foot.appendChild(button("Export code", chipBg, () => { view = "export"; refresh(); }, chip));
   foot.appendChild(button("Import code", chipBg, () => { view = "import"; importDraft = ""; refresh(); }, chip));
   foot.appendChild(button(guideHidden ? "Show guide" : "Hide guide", chipBg, () => { toggleGuide(true); refresh(); }, chip));
   foot.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
+  foot.appendChild(button(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); refresh(); }, chip));
   menu.appendChild(foot);
   if (!IS_TOUCH) {
     menu.appendChild(el("div", { marginTop: "8px", color: "#888", fontSize: "11px" }, "Esc to close"));
@@ -990,6 +992,97 @@ window.addEventListener("resize", layoutVideo);
 window.addEventListener("orientationchange", layoutVideo);
 document.addEventListener("visibilitychange", () => { idleSince = Date.now(); });
 
+// ================= Hide the grayed-out text =================
+// The site shows all the text of a scene, with the part you are reading in white and everything
+// before/after it grayed out. This fades out the grayed-out text (it keeps its place, so scrolling
+// and the site's triggers work as before). The "white" text is found by how it looks: a text line
+// counts as grayed out when it is clearly dimmer than the brightest text on the page.
+// Only runs inside scenes; the menu button "Hide gray text / Show gray text" turns it off and on.
+const DIM_RATIO = 0.8; // dimmer than 80% of the brightest text = grayed out
+let grayHidden = true;
+const fadedSpans = new Set();
+const fadedOrig = new WeakMap();
+let textFrame = false;
+
+function colorBrightness(cs) {
+  const m = (cs.color || "").match(/[\d.]+/g);
+  if (!m || m.length < 3) return 1;
+  const a = m.length > 3 ? parseFloat(m[3]) : 1;
+  return a * (0.299 * m[0] + 0.587 * m[1] + 0.114 * m[2]) / 255;
+}
+
+function effectiveOpacity(node, cache) {
+  if (!node || node.nodeType !== 1) return 1;
+  if (cache.has(node)) return cache.get(node);
+  const o = parseFloat(getComputedStyle(node).opacity);
+  const v = (isNaN(o) ? 1 : o) * effectiveOpacity(node.parentElement, cache);
+  cache.set(node, v);
+  return v;
+}
+
+function setFaded(sp, faded) {
+  if (faded) {
+    if (fadedSpans.has(sp)) return;
+    fadedOrig.set(sp, { f: sp.style.getPropertyValue("filter"), t: sp.style.getPropertyValue("transition") });
+    sp.style.setProperty("transition", "filter 0.25s", "important");
+    sp.style.setProperty("filter", "opacity(0)", "important");
+    fadedSpans.add(sp);
+  } else {
+    if (!fadedSpans.has(sp)) return;
+    fadedSpans.delete(sp);
+    const o = fadedOrig.get(sp) || { f: "", t: "" };
+    if (o.f) sp.style.setProperty("filter", o.f); else sp.style.removeProperty("filter"); // fades back in
+    setTimeout(() => { // then give the span its own transition setting back
+      if (fadedSpans.has(sp)) return;
+      if (o.t) sp.style.setProperty("transition", o.t); else sp.style.removeProperty("transition");
+    }, 400);
+  }
+}
+
+function restoreAllText() {
+  Array.from(fadedSpans).forEach((sp) => setFaded(sp, false));
+}
+
+function applyTextFilter() {
+  const active = grayHidden && sceneKey() !== null && document.visibilityState === "visible";
+  if (!active) { restoreAllText(); return; }
+
+  const spans = [];
+  document.querySelectorAll("span").forEach((sp) => {
+    if (sp.children.length || !sp.textContent.trim()) return;
+    if (sp.closest("[data-vnqs], button, a, select, [role='button']")) return; // our UI, choice buttons, links
+    spans.push(sp);
+  });
+  if (spans.length < 2) { restoreAllText(); return; }
+
+  const cache = new Map();
+  const scores = spans.map((sp) => effectiveOpacity(sp, cache) * colorBrightness(getComputedStyle(sp)));
+  let max = 0;
+  scores.forEach((v) => { if (v > max) max = v; });
+  spans.forEach((sp, i) => setFaded(sp, scores[i] < max * DIM_RATIO));
+  Array.from(fadedSpans).forEach((sp) => { if (!sp.isConnected) fadedSpans.delete(sp); });
+}
+
+function scheduleTextFilter() {
+  if (textFrame) return;
+  textFrame = true;
+  requestAnimationFrame(() => { textFrame = false; applyTextFilter(); });
+}
+
+function toggleGray() {
+  grayHidden = !grayHidden;
+  store.set("fsnGrayHidden", grayHidden);
+  applyTextFilter();
+}
+
+store.get("fsnGrayHidden", true, (v) => {
+  grayHidden = v !== false;
+  applyTextFilter();
+});
+// the white part moves when you scroll or click, so look again right after those
+window.addEventListener("scroll", scheduleTextFilter, { capture: true, passive: true });
+["click", "keyup", "touchend", "wheel"].forEach((t) => window.addEventListener(t, scheduleTextFilter, { capture: true, passive: true }));
+
 // ================= Position display (top left) =================
 // A faint, always-visible box that shows Route / Scene / Part / Page and updates as you move.
 // Computers: top left, with the route guide under it. Phones: bottom right (the menu button is
@@ -1160,6 +1253,7 @@ store.get("fsnGuideHidden", false, (v) => {
 
 function tick() {
   updateHud(false);
+  applyTextFilter();
   updateGuide(false); // the site is a single-page app, so we poll for changes
   watchScene();
   tickIdle();
