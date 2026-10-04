@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.5
-// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, hides the grayed-out text, route guide on choice screens (H hides it), intro videos (when idle, and at key moments).
+// @version      3.6
+// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -357,6 +357,7 @@ function renderMenu(slots, auto, message) {
   foot.appendChild(button(guideHidden ? "Show guide" : "Hide guide", chipBg, () => { toggleGuide(true); refresh(); }, chip));
   foot.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
   foot.appendChild(button(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); refresh(); }, chip));
+  foot.appendChild(button(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); refresh(); }, chip));
   menu.appendChild(foot);
   if (!IS_TOUCH) {
     menu.appendChild(el("div", { marginTop: "8px", color: "#888", fontSize: "11px" }, "Esc to close"));
@@ -992,17 +993,25 @@ window.addEventListener("resize", layoutVideo);
 window.addEventListener("orientationchange", layoutVideo);
 document.addEventListener("visibilitychange", () => { idleSince = Date.now(); });
 
-// ================= Hide the grayed-out text =================
+// ================= Grayed-out text + left-to-right reveal =================
 // The site shows all the text of a scene, with the part you are reading in white and everything
-// before/after it grayed out. This fades out the grayed-out text (it keeps its place, so scrolling
-// and the site's triggers work as before). The "white" text is found by how it looks: a text line
-// counts as grayed out when it is clearly dimmer than the brightest text on the page.
-// Only runs inside scenes; the menu button "Hide gray text / Show gray text" turns it off and on.
-const DIM_RATIO = 0.8; // dimmer than 80% of the brightest text = grayed out
+// before/after it grayed out. Two things happen here, both only inside scenes:
+//  1) the grayed-out text fades out (it keeps its place, so scrolling and the site's triggers work);
+//  2) lines that turn white are revealed line by line, from left to right, like in the novel.
+// The "white" text is found by how it looks: a line counts as grayed out when it is clearly dimmer
+// than the brightest text on the page. Menu buttons turn each feature off and on.
+const DIM_RATIO = 0.8;         // dimmer than 80% of the brightest text = grayed out
+const REVEAL_MS_PER_CHAR = 33; // reveal speed: about 30 characters per second
+const REVEAL_MIN_MS = 250;     // even a very short line takes at least this long
+const REVEAL_PAUSE_MS = 120;   // short pause between two lines
 let grayHidden = true;
+let revealOn = true;
 const fadedSpans = new Set();
 const fadedOrig = new WeakMap();
-let textFrame = false;
+const revealing = new Map();   // line -> its running reveal animation
+let prevActive = null;         // which lines were white at the last look (null = no starting point yet)
+let textScheduled = false;
+let lastTextPass = 0;
 
 function colorBrightness(cs) {
   const m = (cs.color || "").match(/[\d.]+/g);
@@ -1020,7 +1029,7 @@ function effectiveOpacity(node, cache) {
   return v;
 }
 
-function setFaded(sp, faded) {
+function setFaded(sp, faded, instant) {
   if (faded) {
     if (fadedSpans.has(sp)) return;
     fadedOrig.set(sp, { f: sp.style.getPropertyValue("filter"), t: sp.style.getPropertyValue("transition") });
@@ -1031,6 +1040,7 @@ function setFaded(sp, faded) {
     if (!fadedSpans.has(sp)) return;
     fadedSpans.delete(sp);
     const o = fadedOrig.get(sp) || { f: "", t: "" };
+    if (instant) sp.style.setProperty("transition", "none", "important"); // the reveal does the showing
     if (o.f) sp.style.setProperty("filter", o.f); else sp.style.removeProperty("filter"); // fades back in
     setTimeout(() => { // then give the span its own transition setting back
       if (fadedSpans.has(sp)) return;
@@ -1043,9 +1053,39 @@ function restoreAllText() {
   Array.from(fadedSpans).forEach((sp) => setFaded(sp, false));
 }
 
+// Shows the rest of every running reveal at once.
+function finishReveals() {
+  revealing.forEach((a) => { try { a.finish(); } catch (err) { /* ignore */ } });
+  revealing.clear();
+}
+
+// Wipes one line in from left to right after `delay` ms (transparent until then, so the
+// picture behind shows). Returns how long the wipe takes (0 if the browser can't animate it).
+function startReveal(sp, delay) {
+  if (typeof sp.animate !== "function") return 0;
+  const len = sp.textContent.trim().length;
+  const dur = Math.max(REVEAL_MIN_MS, len * REVEAL_MS_PER_CHAR);
+  let anim;
+  try {
+    anim = sp.animate(
+      [{ clipPath: "inset(-0.3em 100% -0.3em 0)" }, { clipPath: "inset(-0.3em -0.3em -0.3em 0)" }],
+      { duration: dur, delay: delay, easing: "linear", fill: "backwards" }
+    );
+  } catch (err) { return 0; }
+  revealing.set(sp, anim);
+  const done = () => { if (revealing.get(sp) === anim) revealing.delete(sp); };
+  anim.onfinish = done;
+  anim.oncancel = done;
+  return dur;
+}
+
 function applyTextFilter() {
-  const active = grayHidden && sceneKey() !== null && document.visibilityState === "visible";
-  if (!active) { restoreAllText(); return; }
+  lastTextPass = Date.now();
+  const inScene = sceneKey() !== null && document.visibilityState === "visible";
+  const wantFilter = grayHidden && inScene;
+  const wantReveal = revealOn && inScene;
+  const reset = () => { restoreAllText(); finishReveals(); prevActive = null; };
+  if (!wantFilter && !wantReveal) { reset(); return; }
 
   const spans = [];
   document.querySelectorAll("span").forEach((sp) => {
@@ -1053,20 +1093,63 @@ function applyTextFilter() {
     if (sp.closest("[data-vnqs], button, a, select, [role='button']")) return; // our UI, choice buttons, links
     spans.push(sp);
   });
-  if (spans.length < 2) { restoreAllText(); return; }
+  if (spans.length < 2) { reset(); return; }
 
   const cache = new Map();
   const scores = spans.map((sp) => effectiveOpacity(sp, cache) * colorBrightness(getComputedStyle(sp)));
   let max = 0;
   scores.forEach((v) => { if (v > max) max = v; });
-  spans.forEach((sp, i) => setFaded(sp, scores[i] < max * DIM_RATIO));
+  const isDim = (i) => scores[i] < max * DIM_RATIO;
+  const activeSet = new Set();
+  spans.forEach((sp, i) => { if (!isDim(i)) activeSet.add(sp); });
+
+  // which lines just turned white while moving forward? Those get revealed.
+  const toReveal = [];
+  const revealSet = new Set();
+  if (wantReveal) {
+    if (prevActive !== null && activeSet.size < spans.length) {
+      revealing.forEach((a, sp) => { // a line that is no longer white: show its rest right away
+        if (!activeSet.has(sp)) { try { a.finish(); } catch (err) { /* ignore */ } revealing.delete(sp); }
+      });
+      let lastPrev = null;
+      prevActive.forEach((sp) => {
+        if (sp.isConnected && (!lastPrev || (lastPrev.compareDocumentPosition(sp) & Node.DOCUMENT_POSITION_FOLLOWING))) lastPrev = sp;
+      });
+      spans.forEach((sp) => {
+        if (!activeSet.has(sp) || prevActive.has(sp)) return;
+        // going back (text above what was white before) shows instantly, forward is revealed
+        if (!lastPrev || (lastPrev.compareDocumentPosition(sp) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+          toReveal.push(sp);
+          revealSet.add(sp);
+        }
+      });
+    }
+    // everything equally bright = not a real state yet, so it can't be a starting point
+    prevActive = activeSet.size < spans.length ? activeSet : null;
+  } else {
+    finishReveals();
+    prevActive = null;
+  }
+
+  spans.forEach((sp, i) => {
+    if (wantFilter && isDim(i)) setFaded(sp, true);
+    else setFaded(sp, false, revealSet.has(sp));
+  });
+
+  let t = 0;
+  toReveal.forEach((sp) => {
+    const d = startReveal(sp, t);
+    if (d) t += d + REVEAL_PAUSE_MS;
+  });
   Array.from(fadedSpans).forEach((sp) => { if (!sp.isConnected) fadedSpans.delete(sp); });
 }
 
+// looks again soon, but never more often than every 100 ms
 function scheduleTextFilter() {
-  if (textFrame) return;
-  textFrame = true;
-  requestAnimationFrame(() => { textFrame = false; applyTextFilter(); });
+  if (textScheduled) return;
+  textScheduled = true;
+  const wait = Math.max(0, 100 - (Date.now() - lastTextPass));
+  setTimeout(() => requestAnimationFrame(() => { textScheduled = false; applyTextFilter(); }), wait);
 }
 
 function toggleGray() {
@@ -1075,13 +1158,34 @@ function toggleGray() {
   applyTextFilter();
 }
 
+function toggleReveal() {
+  revealOn = !revealOn;
+  store.set("fsnReveal", revealOn);
+  finishReveals();
+  prevActive = null; // the text on screen now just stays as it is
+  applyTextFilter();
+}
+
 store.get("fsnGrayHidden", true, (v) => {
   grayHidden = v !== false;
   applyTextFilter();
 });
-// the white part moves when you scroll or click, so look again right after those
+store.get("fsnReveal", true, (v) => {
+  revealOn = v !== false;
+  applyTextFilter();
+});
+
+// the white part moves when you scroll, click or press keys, or when the page changes
 window.addEventListener("scroll", scheduleTextFilter, { capture: true, passive: true });
 ["click", "keyup", "touchend", "wheel"].forEach((t) => window.addEventListener(t, scheduleTextFilter, { capture: true, passive: true }));
+try {
+  new MutationObserver((muts) => {
+    if (muts.some((m) => !(m.target.closest && m.target.closest("[data-vnqs]")))) scheduleTextFilter();
+  }).observe(document.body, { attributes: true, attributeFilter: ["class", "style"], subtree: true, childList: true });
+} catch (err) { /* ignore */ }
+
+// any click, tap or key press finishes the lines that are still being revealed
+["click", "touchend", "keydown"].forEach((t) => window.addEventListener(t, finishReveals, { capture: true, passive: true }));
 
 // ================= Position display (top left) =================
 // A faint, always-visible box that shows Route / Scene / Part / Page and updates as you move.
