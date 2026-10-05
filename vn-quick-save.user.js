@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.8
-// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
+// @version      3.9
+// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, checkmarks on read scenes, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -50,6 +50,7 @@ let menu = null;
 let mode = null;          // "save" | "load" | null
 let pending = null;       // slot index waiting for overwrite confirmation
 let pendingImport = null; // decoded save code waiting for import confirmation
+let pendingReset = false; // asking whether to clear all checkmarks
 let view = null;          // null | "export" | "import" (the save-code screens)
 let importDraft = "";     // text typed or pasted in the import box
 
@@ -158,6 +159,7 @@ function closeMenu() {
   mode = null;
   pending = null;
   pendingImport = null;
+  pendingReset = false;
   view = null;
   importDraft = "";
 }
@@ -175,6 +177,7 @@ function openMenu(newMode) {
   mode = newMode;
   pending = null;
   pendingImport = null;
+  pendingReset = false;
   view = null;
   refresh();
 }
@@ -224,6 +227,20 @@ function renderMenu(slots, auto, message) {
     menu.appendChild(el("div", { color: "#ffb35a", fontSize: "12px", marginBottom: "8px" }, "The old save will be deleted."));
     const btns = el("div", { display: "flex", gap: "8px" });
     btns.appendChild(button("Yes (Y)", "#b00000", confirmYes, { flex: "1" }));
+    btns.appendChild(button("No (N)", "#444", cancelConfirm, { flex: "1" }));
+    menu.appendChild(btns);
+    document.body.appendChild(menu);
+    return;
+  }
+
+  // ----- reset checkmarks confirmation -----
+  if (pendingReset) {
+    menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "8px", color: "#ff5a5a" }, "Reset all checkmarks?"));
+    menu.appendChild(el("div", { marginBottom: "6px" },
+      "Every green checkmark on the main menu and your reading progress in all scenes will be cleared."));
+    menu.appendChild(el("div", { color: "#ffb35a", fontSize: "12px", marginBottom: "8px" }, "This can't be undone."));
+    const btns = el("div", { display: "flex", gap: "8px" });
+    btns.appendChild(button("Yes, reset (Y)", "#b00000", confirmYes, { flex: "1" }));
     btns.appendChild(button("No (N)", "#444", cancelConfirm, { flex: "1" }));
     menu.appendChild(btns);
     document.body.appendChild(menu);
@@ -303,7 +320,7 @@ function renderMenu(slots, auto, message) {
     if (disabled) tab.title = "Saving is disabled on the main menu";
     tab.addEventListener("click", () => {
       if (disabled || m === mode) return;
-      mode = m; pending = null; pendingImport = null; view = null;
+      mode = m; pending = null; pendingImport = null; pendingReset = false; view = null;
       refresh();
     });
     bar.appendChild(tab);
@@ -358,6 +375,8 @@ function renderMenu(slots, auto, message) {
   foot.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
   foot.appendChild(button(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); refresh(); }, chip));
   foot.appendChild(button(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); refresh(); }, chip));
+  foot.appendChild(button("Reset checkmarks", "#8a1010", () => { pendingReset = true; refresh(); },
+    Object.assign({}, chip, { flex: "1 1 100%", color: "#fff" })));
   menu.appendChild(foot);
   if (!IS_TOUCH) {
     menu.appendChild(el("div", { marginTop: "8px", color: "#888", fontSize: "11px" }, "Esc to close"));
@@ -419,6 +438,12 @@ function chooseAuto() {
 }
 
 function confirmYes() {
+  if (pendingReset) {
+    resetProgress();
+    closeMenu();
+    toast("Checkmarks reset.");
+    return;
+  }
   if (pendingImport) { applyImport(); return; }
   if (pending === null) return;
   const i = pending;
@@ -428,6 +453,7 @@ function confirmYes() {
 function cancelConfirm() {
   pending = null;
   pendingImport = null;
+  pendingReset = false;
   refresh();
 }
 
@@ -647,12 +673,12 @@ document.addEventListener("keydown", (e) => {
   // (while an intro video is open, blockKeysWhileVideo() below handles the keys first)
 
   if (menu) {
-    if (view && pending === null && !pendingImport) {
+    if (view && pending === null && !pendingImport && !pendingReset) {
       // on the save-code screens, typing goes to the text box; Esc goes back
       if (key === "escape") { swallow(); view = null; refresh(); }
       return;
     }
-    if (pending !== null || pendingImport) {
+    if (pending !== null || pendingImport || pendingReset) {
       if (key === "y" || key === "enter") { swallow(); confirmYes(); }
       else if (key === "n" || key === "escape") { swallow(); cancelConfirm(); }
       else if (/^[0-9]$/.test(key) || key === SAVE_KEY || key === LOAD_KEY) swallow();
@@ -1024,6 +1050,148 @@ let prevActive = null;          // which lines were white at the last look (null
 let textScheduled = false;
 let lastTextPass = 0;
 
+// ----- read progress and checkmarks on the main menu flowchart -----
+// A scene counts as read when you have been through (nearly) all of its lines: at least 90% of
+// the lines were white at some moment and the last line was reached. Progress is remembered between
+// visits. Finished scenes get a green box with a checkmark on the main menu.
+const READ_FRACTION = 0.9;
+const DONE_BG = "rgba(34, 139, 58, 0.85)";
+const DONE_RING = "0 0 0 2px #3fbf5f inset, 0 0 8px rgba(63, 191, 95, 0.6)";
+let doneScenes = {};      // path -> true
+let progressStore = {};   // path -> { n: number of lines, bits: hex string of the lines already seen }
+let curScene = null;      // { path, n, visited: [bool] } for the scene on screen
+let doneLoaded = false;
+let progressLoaded = false;
+let progressDirty = false;
+let progressTimer = null;
+const markOrig = new WeakMap();
+
+function normPath(p) {
+  return (p || "").replace(/\/+$/, "") || "/";
+}
+
+function bitsToHex(bits) {
+  let out = "";
+  for (let i = 0; i < bits.length; i += 4) {
+    let v = 0;
+    for (let k = 0; k < 4; k++) if (bits[i + k]) v |= 1 << k;
+    out += v.toString(16);
+  }
+  return out;
+}
+
+function hexToBits(hex, n) {
+  const bits = new Array(n).fill(false);
+  for (let i = 0; i < hex.length; i++) {
+    const v = parseInt(hex[i], 16) || 0;
+    for (let k = 0; k < 4; k++) {
+      const idx = i * 4 + k;
+      if (idx < n && ((v >> k) & 1)) bits[idx] = true;
+    }
+  }
+  return bits;
+}
+
+function flushProgress() {
+  progressTimer = null;
+  if (!progressDirty) return;
+  progressDirty = false;
+  if (curScene && !doneScenes[curScene.path]) {
+    progressStore[curScene.path] = { n: curScene.n, bits: bitsToHex(curScene.visited) };
+  }
+  store.set("fsnProgress", progressStore);
+}
+
+function markDone(path) {
+  doneScenes[path] = true;
+  delete progressStore[path];
+  curScene = null;
+  store.set("fsnDone", Object.keys(doneScenes));
+  progressDirty = true;
+  flushProgress();
+}
+
+// Called on every look at a scene page with the lines (in reading order) and which of them are white.
+function trackProgress(spans, activeSet) {
+  if (!doneLoaded || !progressLoaded) return;
+  const path = normPath(location.pathname);
+  if (doneScenes[path]) return;
+  const n = spans.length;
+  if (!curScene || curScene.path !== path) {
+    const saved = progressStore[path];
+    const usable = saved && typeof saved.bits === "string" && saved.n <= n;
+    curScene = { path, n, visited: usable ? hexToBits(saved.bits, n) : new Array(n).fill(false) };
+  } else if (curScene.n !== n) {
+    if (n > curScene.n) { while (curScene.visited.length < n) curScene.visited.push(false); }
+    else curScene.visited = new Array(n).fill(false); // fewer lines than before: the text changed
+    curScene.n = n;
+  }
+  let changed = false;
+  spans.forEach((sp, i) => {
+    if (activeSet.has(sp) && !curScene.visited[i]) { curScene.visited[i] = true; changed = true; }
+  });
+  if (!changed) return;
+  progressDirty = true;
+  if (!progressTimer) progressTimer = setTimeout(flushProgress, 1500);
+  const seen = curScene.visited.filter(Boolean).length;
+  const lastReached = curScene.visited[n - 1] || (n > 1 && curScene.visited[n - 2]);
+  if (n >= 2 && seen / n >= READ_FRACTION && lastReached) markDone(path);
+}
+
+// Green box + checkmark badge on the flowchart boxes of finished scenes (the text is not changed).
+function applyMenuMarks() {
+  if (!doneLoaded) return;
+  document.querySelectorAll("a.graph-item").forEach((a) => {
+    let path;
+    try { path = normPath(new URL(a.getAttribute("href") || "", location.href).pathname); } catch (err) { return; }
+    const done = !!doneScenes[path];
+    const marked = a.hasAttribute("data-vnqs-done");
+    if (done) {
+      if (!marked) {
+        markOrig.set(a, {
+          bg: a.style.getPropertyValue("background-color"),
+          shadow: a.style.getPropertyValue("box-shadow"),
+          pos: a.style.getPropertyValue("position")
+        });
+        a.style.setProperty("background-color", DONE_BG, "important");
+        a.style.setProperty("box-shadow", DONE_RING, "important");
+        if (getComputedStyle(a).position === "static") a.style.setProperty("position", "relative");
+        a.setAttribute("data-vnqs-done", "1");
+      }
+      if (!a.querySelector("[data-vnqs-badge]")) {
+        const badge = document.createElement("span");
+        badge.setAttribute("data-vnqs", "1");
+        badge.setAttribute("data-vnqs-badge", "1");
+        Object.assign(badge.style, {
+          position: "absolute", top: "-9px", right: "-9px", width: "20px", height: "20px",
+          borderRadius: "50%", background: "#2fa84f", color: "#fff", font: "bold 13px/20px sans-serif",
+          textAlign: "center", pointerEvents: "none", boxShadow: "0 0 3px rgba(0,0,0,0.6)"
+        });
+        badge.textContent = "\u2713";
+        a.appendChild(badge);
+      }
+    } else if (marked) {
+      const o = markOrig.get(a) || { bg: "", shadow: "", pos: "" };
+      [["background-color", o.bg], ["box-shadow", o.shadow], ["position", o.pos]].forEach(([prop, val]) => {
+        if (val) a.style.setProperty(prop, val); else a.style.removeProperty(prop);
+      });
+      const badge = a.querySelector("[data-vnqs-badge]");
+      if (badge) badge.remove();
+      a.removeAttribute("data-vnqs-done");
+    }
+  });
+}
+
+function resetProgress() {
+  doneScenes = {};
+  progressStore = {};
+  curScene = null;
+  progressDirty = false;
+  store.set("fsnDone", []);
+  store.set("fsnProgress", {});
+  applyMenuMarks();
+}
+
 function colorBrightness(cs) {
   const m = (cs.color || "").match(/[\d.]+/g);
   if (!m || m.length < 3) return 1;
@@ -1136,11 +1304,12 @@ function queueReveal(list) {
 function applyTextFilter() {
   if (document.visibilityState !== "visible") return; // leave everything as it is while the tab is in the background
   lastTextPass = Date.now();
+  applyMenuMarks();
   const inScene = sceneKey() !== null;
   const wantFilter = grayHidden && inScene;
   const wantReveal = revealOn && inScene;
   const reset = () => { restoreAllText(); finishReveals(); prevActive = null; };
-  if (!wantFilter && !wantReveal) { reset(); return; }
+  if (!inScene) { reset(); return; }
 
   const spans = [];
   document.querySelectorAll("span").forEach((sp) => {
@@ -1157,12 +1326,13 @@ function applyTextFilter() {
   const isDim = (i) => scores[i] < max * DIM_RATIO;
   const activeSet = new Set();
   spans.forEach((sp, i) => { if (!isDim(i)) activeSet.add(sp); });
+  const real = activeSet.size < spans.length; // everything equally bright is not a real state yet
+  if (real) trackProgress(spans, activeSet);
 
   // which lines just turned white? Those are revealed (text above what was white before shows instantly)
   const toReveal = [];
   const revealSet = new Set();
   if (wantReveal) {
-    const real = activeSet.size < spans.length; // everything equally bright is not a real state yet
     if (real) {
       if (prevActive === null) {
         // first real look after opening a page / entering a scene: reveal what is white now
@@ -1225,6 +1395,19 @@ function toggleReveal() {
   skipNextStart = true; // the text on screen now just stays as it is
   applyTextFilter();
 }
+
+store.get("fsnDone", [], (arr) => {
+  doneScenes = {};
+  (Array.isArray(arr) ? arr : []).forEach((p) => { if (typeof p === "string") doneScenes[p] = true; });
+  doneLoaded = true;
+  applyMenuMarks();
+});
+store.get("fsnProgress", {}, (v) => {
+  progressStore = v && typeof v === "object" ? v : {};
+  progressLoaded = true;
+});
+window.addEventListener("pagehide", flushProgress);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushProgress(); });
 
 store.get("fsnGrayHidden", true, (v) => {
   grayHidden = v !== false;
