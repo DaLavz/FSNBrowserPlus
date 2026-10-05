@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.6
-// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle, and at key moments).
+// @version      3.8
+// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -714,9 +714,9 @@ function watchScene() {
 }
 
 // ================= Intro video =================
-// If the page stays unchanged for a while (25 s the first time, 40 s once a video was
-// watched), a big window plays the intro video of the current route (the main page plays
-// the Fate one). The countdown restarts after the window closes. No controls: just an X (or Esc) to close it.
+// On the main menu pages (/, /fate, /ubw, /hf), if the page stays unchanged for a while (25 s the
+// first time, 40 s once a video was watched), a big window plays the intro video of that route
+// (/ plays the Fate one). Not inside scenes. The countdown restarts after the window closes. No controls: just an X (or Esc) to close it.
 // ----- silence the VN's own music while a video plays -----
 // Mutes <audio>/<video> elements of the page (including ones the page created with
 // new Audio() and played after this script loaded) and Howler.js if the page uses it.
@@ -956,6 +956,7 @@ function tickIdle() {
   }
   if (videoBox) { duckPageAudio(); return; } // also silences music that starts during the video
   if (menu || document.visibilityState !== "visible") { idleSince = Date.now(); return; }
+  if (sceneKey() !== null) { idleSince = Date.now(); return; } // no idle openings inside scenes, only on the main menu pages
   const kind = routeKind();
   if (!kind || failedRoutes[kind]) return;
   const wait = seenRoutes[kind] ? IDLE_REPEAT_MS : IDLE_FIRST_MS;
@@ -1000,16 +1001,26 @@ document.addEventListener("visibilitychange", () => { idleSince = Date.now(); })
 //  2) lines that turn white are revealed line by line, from left to right, like in the novel.
 // The "white" text is found by how it looks: a line counts as grayed out when it is clearly dimmer
 // than the brightest text on the page. Menu buttons turn each feature off and on.
-const DIM_RATIO = 0.8;         // dimmer than 80% of the brightest text = grayed out
-const REVEAL_MS_PER_CHAR = 33; // reveal speed: about 30 characters per second
-const REVEAL_MIN_MS = 250;     // even a very short line takes at least this long
-const REVEAL_PAUSE_MS = 120;   // short pause between two lines
+const DIM_RATIO = 0.8;          // dimmer than 80% of the brightest text = grayed out
+const REVEAL_MS_PER_CHAR = 45;  // reveal speed: about 22 characters per second
+const REVEAL_MIN_MS = 300;      // even a very short line takes at least this long
+const REVEAL_PAUSE_MS = 120;    // short pause between two lines
+const REVEAL_SETTLE_MS = 100;   // lines that turn white a moment apart are collected and revealed in order
+const REVEAL_SETTLE_MAX_MS = 400;
+const HIDDEN_CLIP = "inset(-0.3em 100% -0.3em 0)";
+const SHOWN_CLIP = "inset(-0.3em -0.3em -0.3em 0)";
 let grayHidden = true;
 let revealOn = true;
 const fadedSpans = new Set();
 const fadedOrig = new WeakMap();
-const revealing = new Map();   // line -> its running reveal animation
-let prevActive = null;         // which lines were white at the last look (null = no starting point yet)
+const revealing = new Map();    // line -> its running reveal animation
+const pendingReveal = new Set(); // lines that just turned white and wait for their turn (kept transparent)
+let pendingSince = 0;
+let settleTimer = null;
+let queueEnd = 0;               // when the last scheduled line finishes (so new lines queue up behind it)
+let lastRevealActivity = 0;
+let skipNextStart = false;      // after turning the reveal on, the text on screen is just left as it is
+let prevActive = null;          // which lines were white at the last look (null = no starting point yet)
 let textScheduled = false;
 let lastTextPass = 0;
 
@@ -1028,6 +1039,14 @@ function effectiveOpacity(node, cache) {
   cache.set(node, v);
   return v;
 }
+
+function docOrder(a, b) {
+  if (a === b) return 0;
+  return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+}
+
+function hideNow(sp) { sp.style.setProperty("clip-path", HIDDEN_CLIP, "important"); }
+function unhideNow(sp) { sp.style.removeProperty("clip-path"); }
 
 function setFaded(sp, faded, instant) {
   if (faded) {
@@ -1053,10 +1072,14 @@ function restoreAllText() {
   Array.from(fadedSpans).forEach((sp) => setFaded(sp, false));
 }
 
-// Shows the rest of every running reveal at once.
+// Shows everything that is still waiting or being revealed, at once.
 function finishReveals() {
+  if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+  pendingReveal.forEach(unhideNow);
+  pendingReveal.clear();
   revealing.forEach((a) => { try { a.finish(); } catch (err) { /* ignore */ } });
   revealing.clear();
+  queueEnd = 0;
 }
 
 // Wipes one line in from left to right after `delay` ms (transparent until then, so the
@@ -1068,20 +1091,52 @@ function startReveal(sp, delay) {
   let anim;
   try {
     anim = sp.animate(
-      [{ clipPath: "inset(-0.3em 100% -0.3em 0)" }, { clipPath: "inset(-0.3em -0.3em -0.3em 0)" }],
+      [{ clipPath: HIDDEN_CLIP }, { clipPath: SHOWN_CLIP }],
       { duration: dur, delay: delay, easing: "linear", fill: "backwards" }
     );
   } catch (err) { return 0; }
+  unhideNow(sp); // the animation keeps the line transparent until its turn
   revealing.set(sp, anim);
-  const done = () => { if (revealing.get(sp) === anim) revealing.delete(sp); };
+  queueEnd = Math.max(queueEnd, Date.now() + delay + dur);
+  lastRevealActivity = Date.now();
+  const done = () => {
+    if (revealing.get(sp) === anim) revealing.delete(sp);
+    if (!revealing.size && !pendingReveal.size) queueEnd = 0;
+  };
   anim.onfinish = done;
   anim.oncancel = done;
   return dur;
 }
 
+// Starts the collected lines one after the other, in reading order, behind any line still running.
+function flushReveals() {
+  settleTimer = null;
+  const list = Array.from(pendingReveal).filter((sp) => sp.isConnected).sort(docOrder);
+  pendingReveal.clear();
+  let t = Math.max(0, queueEnd - Date.now());
+  if (t > 0) t += REVEAL_PAUSE_MS;
+  list.forEach((sp) => {
+    const d = startReveal(sp, t);
+    if (d) t += d + REVEAL_PAUSE_MS; else unhideNow(sp);
+  });
+}
+
+// Lines that just turned white are made transparent right away, then collected for a moment
+// so that lines turning white a little apart still reveal in order.
+function queueReveal(list) {
+  if (!list.length) return;
+  if (!pendingReveal.size) pendingSince = Date.now();
+  list.forEach((sp) => { hideNow(sp); pendingReveal.add(sp); });
+  lastRevealActivity = Date.now();
+  if (settleTimer) clearTimeout(settleTimer);
+  const wait = Math.max(0, Math.min(REVEAL_SETTLE_MS, pendingSince + REVEAL_SETTLE_MAX_MS - Date.now()));
+  settleTimer = setTimeout(flushReveals, wait);
+}
+
 function applyTextFilter() {
+  if (document.visibilityState !== "visible") return; // leave everything as it is while the tab is in the background
   lastTextPass = Date.now();
-  const inScene = sceneKey() !== null && document.visibilityState === "visible";
+  const inScene = sceneKey() !== null;
   const wantFilter = grayHidden && inScene;
   const wantReveal = revealOn && inScene;
   const reset = () => { restoreAllText(); finishReveals(); prevActive = null; };
@@ -1103,29 +1158,39 @@ function applyTextFilter() {
   const activeSet = new Set();
   spans.forEach((sp, i) => { if (!isDim(i)) activeSet.add(sp); });
 
-  // which lines just turned white while moving forward? Those get revealed.
+  // which lines just turned white? Those are revealed (text above what was white before shows instantly)
   const toReveal = [];
   const revealSet = new Set();
   if (wantReveal) {
-    if (prevActive !== null && activeSet.size < spans.length) {
-      revealing.forEach((a, sp) => { // a line that is no longer white: show its rest right away
-        if (!activeSet.has(sp)) { try { a.finish(); } catch (err) { /* ignore */ } revealing.delete(sp); }
-      });
-      let lastPrev = null;
-      prevActive.forEach((sp) => {
-        if (sp.isConnected && (!lastPrev || (lastPrev.compareDocumentPosition(sp) & Node.DOCUMENT_POSITION_FOLLOWING))) lastPrev = sp;
-      });
-      spans.forEach((sp) => {
-        if (!activeSet.has(sp) || prevActive.has(sp)) return;
-        // going back (text above what was white before) shows instantly, forward is revealed
-        if (!lastPrev || (lastPrev.compareDocumentPosition(sp) & Node.DOCUMENT_POSITION_FOLLOWING)) {
-          toReveal.push(sp);
-          revealSet.add(sp);
-        }
-      });
+    const real = activeSet.size < spans.length; // everything equally bright is not a real state yet
+    if (real) {
+      if (prevActive === null) {
+        // first real look after opening a page / entering a scene: reveal what is white now
+        if (!skipNextStart) spans.forEach((sp) => { if (activeSet.has(sp)) toReveal.push(sp); });
+        skipNextStart = false;
+      } else {
+        pendingReveal.forEach((sp) => { // a waiting line that is no longer white just shows
+          if (!activeSet.has(sp)) { pendingReveal.delete(sp); unhideNow(sp); }
+        });
+        revealing.forEach((a, sp) => { // a running line that is no longer white: show its rest right away
+          if (!activeSet.has(sp)) { try { a.finish(); } catch (err) { /* ignore */ } revealing.delete(sp); }
+        });
+        let lastPrev = null;
+        prevActive.forEach((sp) => {
+          if (sp.isConnected && (!lastPrev || (lastPrev.compareDocumentPosition(sp) & Node.DOCUMENT_POSITION_FOLLOWING))) lastPrev = sp;
+        });
+        spans.forEach((sp) => {
+          if (!activeSet.has(sp) || prevActive.has(sp)) return;
+          // going back (text above what was white before) shows instantly, forward is revealed
+          if (!lastPrev || (lastPrev.compareDocumentPosition(sp) & Node.DOCUMENT_POSITION_FOLLOWING)) toReveal.push(sp);
+        });
+      }
+      prevActive = activeSet;
+    } else {
+      prevActive = null;
     }
-    // everything equally bright = not a real state yet, so it can't be a starting point
-    prevActive = activeSet.size < spans.length ? activeSet : null;
+    toReveal.forEach((sp) => revealSet.add(sp));
+    queueReveal(toReveal);
   } else {
     finishReveals();
     prevActive = null;
@@ -1134,12 +1199,6 @@ function applyTextFilter() {
   spans.forEach((sp, i) => {
     if (wantFilter && isDim(i)) setFaded(sp, true);
     else setFaded(sp, false, revealSet.has(sp));
-  });
-
-  let t = 0;
-  toReveal.forEach((sp) => {
-    const d = startReveal(sp, t);
-    if (d) t += d + REVEAL_PAUSE_MS;
   });
   Array.from(fadedSpans).forEach((sp) => { if (!sp.isConnected) fadedSpans.delete(sp); });
 }
@@ -1162,7 +1221,8 @@ function toggleReveal() {
   revealOn = !revealOn;
   store.set("fsnReveal", revealOn);
   finishReveals();
-  prevActive = null; // the text on screen now just stays as it is
+  prevActive = null;
+  skipNextStart = true; // the text on screen now just stays as it is
   applyTextFilter();
 }
 
@@ -1184,8 +1244,23 @@ try {
   }).observe(document.body, { attributes: true, attributeFilter: ["class", "style"], subtree: true, childList: true });
 } catch (err) { /* ignore */ }
 
-// any click, tap or key press finishes the lines that are still being revealed
-["click", "touchend", "keydown"].forEach((t) => window.addEventListener(t, finishReveals, { capture: true, passive: true }));
+// any click, tap or key press shows the lines that are still waiting or being revealed.
+// (A click/tap right after new text started is just the end of the gesture that moved the page on.)
+// The script's own keys (S, L, H), keys used inside its menu or video window, and clicks on its own
+// windows and buttons don't count.
+function skipReveals(e) {
+  if (e.type === "keydown") {
+    const k = (e.key || "").toLowerCase();
+    if (k === SAVE_KEY || k === LOAD_KEY || k === GUIDE_KEY) return;
+    if (menu || videoBox) return;
+    if (k === "shift" || k === "control" || k === "alt" || k === "meta") return;
+  } else if (e.target && e.target.closest && e.target.closest("[data-vnqs]")) {
+    return;
+  }
+  if ((e.type === "click" || e.type === "touchend") && Date.now() - lastRevealActivity < 250) return;
+  finishReveals();
+}
+["click", "touchend", "keydown"].forEach((t) => window.addEventListener(t, skipReveals, { capture: true, passive: true }));
 
 // ================= Position display (top left) =================
 // A faint, always-visible box that shows Route / Scene / Part / Page and updates as you move.
