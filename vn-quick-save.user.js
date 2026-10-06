@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.10
+// @version      3.11
 // @description  S = save menu, L = load menu (6 slots + auto-save). Position display, checkmarks on read scenes, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -1043,7 +1043,6 @@ const revealing = new Map();    // line -> its running reveal animation
 const pendingReveal = new Set(); // lines that just turned white and wait for their turn (kept transparent)
 let pendingSince = 0;
 let settleTimer = null;
-let queueEnd = 0;               // when the last scheduled line finishes (so new lines queue up behind it)
 let lastRevealActivity = 0;
 let skipNextStart = false;      // after turning the reveal on, the text on screen is just left as it is
 let prevActive = null;          // which lines were white at the last look (null = no starting point yet)
@@ -1247,7 +1246,18 @@ function finishReveals() {
   pendingReveal.clear();
   revealing.forEach((a) => { try { a.finish(); } catch (err) { /* ignore */ } });
   revealing.clear();
-  queueEnd = 0;
+}
+
+// When the lines that are still really being revealed will be done (so new lines queue up behind them).
+// Worked out from the running animations every time, so nothing stale can be left over from lines
+// that were finished, skipped or removed (a finished animation reports its "finish" a moment later).
+function queueEndTime() {
+  let end = 0;
+  revealing.forEach((a, sp) => {
+    if (!sp.isConnected || a.playState === "finished") return;
+    if (a.vnqsEnd > end) end = a.vnqsEnd;
+  });
+  return end;
 }
 
 // Wipes one line in from left to right after `delay` ms (transparent until then, so the
@@ -1265,11 +1275,10 @@ function startReveal(sp, delay) {
   } catch (err) { return 0; }
   unhideNow(sp); // the animation keeps the line transparent until its turn
   revealing.set(sp, anim);
-  queueEnd = Math.max(queueEnd, Date.now() + delay + dur);
+  anim.vnqsEnd = Date.now() + delay + dur;
   lastRevealActivity = Date.now();
   const done = () => {
     if (revealing.get(sp) === anim) revealing.delete(sp);
-    if (!revealing.size && !pendingReveal.size) queueEnd = 0;
   };
   anim.onfinish = done;
   anim.oncancel = done;
@@ -1281,7 +1290,7 @@ function flushReveals() {
   settleTimer = null;
   const list = Array.from(pendingReveal).filter((sp) => sp.isConnected).sort(docOrder);
   pendingReveal.clear();
-  let t = Math.max(0, queueEnd - Date.now());
+  let t = Math.max(0, queueEndTime() - Date.now());
   if (t > 0) t += REVEAL_PAUSE_MS;
   list.forEach((sp) => {
     const d = startReveal(sp, t);
