@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.9
+// @version      3.10
 // @description  S = save menu, L = load menu (6 slots + auto-save). Position display, checkmarks on read scenes, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -1427,23 +1427,22 @@ try {
   }).observe(document.body, { attributes: true, attributeFilter: ["class", "style"], subtree: true, childList: true });
 } catch (err) { /* ignore */ }
 
-// any click, tap or key press shows the lines that are still waiting or being revealed.
-// (A click/tap right after new text started is just the end of the gesture that moved the page on.)
-// The script's own keys (S, L, H), keys used inside its menu or video window, and clicks on its own
-// windows and buttons don't count.
+// Only a click, a tap, or the Enter key shows the lines that are still waiting or being revealed at
+// once. Scrolling (wheel, touch-drag) and the navigation keys (arrows, Page Up/Down, Home/End, Space)
+// never skip, so you can scroll down a long page while the text keeps being revealed.
+// (A tap is a click, so touch scrolling doesn't skip either. A click/tap right after new text started
+// is just the end of the gesture that moved the page on, and the script's own keys, menu and windows
+// don't count.)
 function skipReveals(e) {
   if (e.type === "keydown") {
-    const k = (e.key || "").toLowerCase();
-    if (k === SAVE_KEY || k === LOAD_KEY || k === GUIDE_KEY) return;
-    if (menu || videoBox) return;
-    if (k === "shift" || k === "control" || k === "alt" || k === "meta") return;
+    if (e.key !== "Enter" || menu || videoBox) return;
   } else if (e.target && e.target.closest && e.target.closest("[data-vnqs]")) {
     return;
   }
-  if ((e.type === "click" || e.type === "touchend") && Date.now() - lastRevealActivity < 250) return;
+  if (e.type === "click" && Date.now() - lastRevealActivity < 250) return;
   finishReveals();
 }
-["click", "touchend", "keydown"].forEach((t) => window.addEventListener(t, skipReveals, { capture: true, passive: true }));
+["click", "keydown"].forEach((t) => window.addEventListener(t, skipReveals, { capture: true, passive: true }));
 
 // ================= Position display (top left) =================
 // A faint, always-visible box that shows Route / Scene / Part / Page and updates as you move.
