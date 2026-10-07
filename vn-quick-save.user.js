@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.11
-// @description  S = save menu, L = load menu (6 slots + auto-save). Position display, checkmarks on read scenes, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
+// @version      3.12
+// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Position display, checkmarks on read scenes, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -23,6 +23,7 @@ const store = {
 const SAVE_KEY = "s";
 const LOAD_KEY = "l";
 const GUIDE_KEY = "h"; // hides/shows the route guide
+const SETTINGS_KEY = "g"; // opens the Settings tab
 const SLOTS = 6;
 
 // Intro video (pops up when the page stays unchanged for a while)
@@ -43,7 +44,8 @@ const AUTO_COLOR = "#c13cff"; // bright purple for the auto-save slot
 const COLS = "18px minmax(0, 1.5fr) minmax(0, 1fr) 36px 36px";
 const THEMES = {
   save: { border: "#b00000", title: "#ff5a5a", row: "rgba(255,255,255,0.06)" },
-  load: { border: "#1e6fff", title: "#6fb0ff", row: "rgba(60,130,255,0.14)" }
+  load: { border: "#1e6fff", title: "#6fb0ff", row: "rgba(60,130,255,0.14)" },
+  settings: { border: "#5f6672", title: "#c4c8cf", row: "rgba(255,255,255,0.06)" }
 };
 
 let menu = null;
@@ -309,14 +311,14 @@ function renderMenu(slots, auto, message) {
 
   // ----- top bar: Save / Load tabs + close -----
   const bar = el("div", { display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" });
-  ["save", "load"].forEach((m) => {
+  ["save", "load", "settings"].forEach((m) => {
     const active = m === mode;
     const disabled = m === "save" && !canSave();
     const tab = el("div", {
       padding: "4px 14px", borderRadius: "14px", cursor: disabled ? "default" : "pointer", fontWeight: "bold",
       background: active ? THEMES[m].border : "rgba(255,255,255,0.08)",
       color: active ? "#fff" : "#aaa", opacity: disabled ? "0.35" : "1"
-    }, m === "save" ? "Save" : "Load");
+    }, m === "save" ? "Save" : m === "load" ? "Load" : "Settings");
     if (disabled) tab.title = "Saving is disabled on the main menu";
     tab.addEventListener("click", () => {
       if (disabled || m === mode) return;
@@ -330,6 +332,16 @@ function renderMenu(slots, auto, message) {
   x.addEventListener("click", closeMenu);
   bar.appendChild(x);
   menu.appendChild(bar);
+
+  if (mode === "settings") {
+    renderSettingsPage(message);
+    if (!IS_TOUCH) {
+      menu.appendChild(el("div", { marginTop: "10px", color: "#888", fontSize: "11px" },
+        SETTINGS_KEY.toUpperCase() + " or Esc to close"));
+    }
+    document.body.appendChild(menu);
+    return;
+  }
 
   menu.appendChild(el("div", { color: theme.title, fontSize: "12px", marginBottom: "8px" },
     mode === "save"
@@ -365,23 +377,45 @@ function renderMenu(slots, auto, message) {
     menu.appendChild(el("div", { marginTop: "6px", color: "#ffb35a", fontSize: "12px" }, message));
   }
 
-  // ----- footer buttons (click only) -----
-  const foot = el("div", { display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "10px" });
-  const chip = { flex: "1 1 30%", fontWeight: "normal", fontSize: "12px", padding: "7px 4px" };
-  const chipBg = "rgba(255,255,255,0.12)";
-  foot.appendChild(button("Export code", chipBg, () => { view = "export"; refresh(); }, chip));
-  foot.appendChild(button("Import code", chipBg, () => { view = "import"; importDraft = ""; refresh(); }, chip));
-  foot.appendChild(button(guideHidden ? "Show guide" : "Hide guide", chipBg, () => { toggleGuide(true); refresh(); }, chip));
-  foot.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
-  foot.appendChild(button(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); refresh(); }, chip));
-  foot.appendChild(button(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); refresh(); }, chip));
-  foot.appendChild(button("Reset checkmarks", "#8a1010", () => { pendingReset = true; refresh(); },
-    Object.assign({}, chip, { flex: "1 1 100%", color: "#fff" })));
-  menu.appendChild(foot);
   if (!IS_TOUCH) {
     menu.appendChild(el("div", { marginTop: "8px", color: "#888", fontSize: "11px" }, "Esc to close"));
   }
   document.body.appendChild(menu);
+}
+
+// All the options live in the Settings tab (click only; the guide also has its own key, H).
+function renderSettingsPage(message) {
+  const chipBg = "rgba(255,255,255,0.12)";
+  const chip = { flex: "1 1 45%", fontWeight: "normal", fontSize: "13px", padding: "9px 6px" };
+  const section = (title) => menu.appendChild(el("div", {
+    color: "#8a8f98", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.5px", margin: "12px 0 6px"
+  }, title));
+  const group = () => {
+    const g = el("div", { display: "flex", flexWrap: "wrap", gap: "6px" });
+    menu.appendChild(g);
+    return g;
+  };
+
+  section("Display and text");
+  let g = group();
+  g.appendChild(button(guideHidden ? "Show guide" : "Hide guide", chipBg, () => { toggleGuide(true); refresh(); }, chip));
+  g.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
+  g.appendChild(button(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); refresh(); }, chip));
+  g.appendChild(button(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); refresh(); }, chip));
+
+  section("Save codes");
+  g = group();
+  g.appendChild(button("Export code", chipBg, () => { view = "export"; refresh(); }, chip));
+  g.appendChild(button("Import code", chipBg, () => { view = "import"; importDraft = ""; refresh(); }, chip));
+
+  section("Progress");
+  g = group();
+  g.appendChild(button("Reset checkmarks", "#8a1010", () => { pendingReset = true; refresh(); },
+    Object.assign({}, chip, { flex: "1 1 100%", color: "#fff" })));
+
+  if (message) {
+    menu.appendChild(el("div", { marginTop: "8px", color: "#ffb35a", fontSize: "12px" }, message));
+  }
 }
 
 // ---------- save / load actions ----------
@@ -681,11 +715,11 @@ document.addEventListener("keydown", (e) => {
     if (pending !== null || pendingImport || pendingReset) {
       if (key === "y" || key === "enter") { swallow(); confirmYes(); }
       else if (key === "n" || key === "escape") { swallow(); cancelConfirm(); }
-      else if (/^[0-9]$/.test(key) || key === SAVE_KEY || key === LOAD_KEY) swallow();
+      else if (/^[0-9]$/.test(key) || key === SAVE_KEY || key === LOAD_KEY || key === SETTINGS_KEY) swallow();
       return;
     }
     const n = parseInt(key, 10);
-    if (n >= 1 && n <= SLOTS) {
+    if (n >= 1 && n <= SLOTS && mode !== "settings") {
       swallow();
       chooseSlot(n - 1);
     } else if (key === "0" && mode === "load") {
@@ -694,9 +728,9 @@ document.addEventListener("keydown", (e) => {
     } else if (key === "escape") {
       swallow();
       closeMenu();
-    } else if (key === SAVE_KEY || key === LOAD_KEY) {
+    } else if (key === SAVE_KEY || key === LOAD_KEY || key === SETTINGS_KEY) {
       swallow();
-      const wanted = key === SAVE_KEY ? "save" : "load";
+      const wanted = key === SAVE_KEY ? "save" : key === LOAD_KEY ? "load" : "settings";
       if (wanted === mode) closeMenu(); else openMenu(wanted);
     }
     return;
@@ -705,6 +739,7 @@ document.addEventListener("keydown", (e) => {
   if (isTyping(e)) return;
   if (key === SAVE_KEY) openMenu("save");
   else if (key === LOAD_KEY) openMenu("load");
+  else if (key === SETTINGS_KEY) openMenu("settings");
   else if (key === GUIDE_KEY) toggleGuide(false);
 }, true);
 
@@ -720,6 +755,22 @@ if (IS_TOUCH && document.body) {
   swallowEvents(fab);
   fab.addEventListener("click", () => { if (menu) closeMenu(); else openMenu("load"); });
   document.body.appendChild(fab);
+}
+
+// ---------- small "Settings" box in the top right ----------
+if (document.body) {
+  const settingsBox = el("div", {
+    position: "fixed", top: "16px", right: "16px", zIndex: 2147483645,
+    background: "rgba(0,0,0,0.35)", color: "#fff", padding: "5px 10px", borderRadius: "6px",
+    font: "13px sans-serif", textAlign: "center", lineHeight: "1.25", cursor: "pointer",
+    textShadow: "0 0 3px rgba(0,0,0,0.8)"
+  });
+  settingsBox.appendChild(el("div", { fontWeight: "bold" }, "Settings"));
+  settingsBox.appendChild(el("div", { fontSize: "10px", color: "rgba(255,255,255,0.65)" },
+    IS_TOUCH ? "tap here" : "press " + SETTINGS_KEY.toUpperCase()));
+  swallowEvents(settingsBox);
+  settingsBox.addEventListener("click", () => { if (menu && mode === "settings") closeMenu(); else openMenu("settings"); });
+  document.body.appendChild(settingsBox);
 }
 
 // ================= Auto-save =================
@@ -1028,8 +1079,8 @@ document.addEventListener("visibilitychange", () => { idleSince = Date.now(); })
 // The "white" text is found by how it looks: a line counts as grayed out when it is clearly dimmer
 // than the brightest text on the page. Menu buttons turn each feature off and on.
 const DIM_RATIO = 0.8;          // dimmer than 80% of the brightest text = grayed out
-const REVEAL_MS_PER_CHAR = 45;  // reveal speed: about 22 characters per second
-const REVEAL_MIN_MS = 300;      // even a very short line takes at least this long
+const REVEAL_MS_PER_CHAR = 33;  // reveal speed: about 30 characters per second
+const REVEAL_MIN_MS = 250;      // even a very short line takes at least this long
 const REVEAL_PAUSE_MS = 120;    // short pause between two lines
 const REVEAL_SETTLE_MS = 100;   // lines that turn white a moment apart are collected and revealed in order
 const REVEAL_SETTLE_MAX_MS = 400;
