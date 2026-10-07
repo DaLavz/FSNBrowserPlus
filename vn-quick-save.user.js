@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.14
-// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Position display, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
+// @version      3.13
+// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Position display, checkmarks on read scenes, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -402,7 +402,6 @@ function renderSettingsPage(message) {
   g.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
   g.appendChild(button(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); refresh(); }, chip));
   g.appendChild(button(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); refresh(); }, chip));
-  g.appendChild(button(showDojos ? "Hide tiger dojos" : "Show tiger dojos", chipBg, () => { toggleDojos(); refresh(); }, chip));
 
   section("Save codes");
   g = group();
@@ -1118,10 +1117,6 @@ let progressLoaded = false;
 let progressDirty = false;
 let progressTimer = null;
 const markOrig = new WeakMap();
-// Tiger dojos on the flowchart: hidden until you open one, red while unfinished, green when read.
-const PARTIAL_BG = "rgba(190, 40, 40, 0.85)";
-const PARTIAL_RING = "0 0 0 2px #ff5a5a inset, 0 0 8px rgba(255, 90, 90, 0.6)";
-let showDojos = false;    // Settings switch: show every tiger dojo on the flowchart
 
 function normPath(p) {
   return (p || "").replace(/\/+$/, "") || "/";
@@ -1195,79 +1190,48 @@ function trackProgress(spans, activeSet) {
   if (n >= 2 && seen / n >= READ_FRACTION && lastReached) markDone(path);
 }
 
-// A flowchart box is a tiger dojo when its label says so.
-function isDojoLink(a) {
-  return /tiger\s*dojo/i.test(a.textContent || "");
-}
-
-// True once at least one line of the scene has been seen.
-function sceneStarted(path) {
-  if (progressStore[path]) return true;
-  return !!(curScene && curScene.path === path && curScene.visited.some(Boolean));
-}
-
-function restoreMark(a) {
-  const o = markOrig.get(a) || {};
-  [["background-color", o.bg], ["box-shadow", o.shadow], ["position", o.pos], ["display", o.display]].forEach(([prop, val]) => {
-    if (val) a.style.setProperty(prop, val); else a.style.removeProperty(prop);
-  });
-  const badge = a.querySelector("[data-vnqs-badge]");
-  if (badge) badge.remove();
-  a.removeAttribute("data-vnqs-state");
-}
-
-function setMark(a, state) {
-  markOrig.set(a, {
-    bg: a.style.getPropertyValue("background-color"),
-    shadow: a.style.getPropertyValue("box-shadow"),
-    pos: a.style.getPropertyValue("position"),
-    display: a.style.getPropertyValue("display")
-  });
-  if (state === "hidden") {
-    a.style.setProperty("display", "none", "important");
-  } else {
-    const done = state === "done";
-    a.style.setProperty("background-color", done ? DONE_BG : PARTIAL_BG, "important");
-    a.style.setProperty("box-shadow", done ? DONE_RING : PARTIAL_RING, "important");
-    if (getComputedStyle(a).position === "static") a.style.setProperty("position", "relative");
-  }
-  a.setAttribute("data-vnqs-state", state);
-}
-
-// Flowchart boxes: green + checkmark badge for finished scenes. Tiger dojos are hidden until you have
-// opened one, then red while unfinished (green + check once read). The text is not changed.
+// Green box + checkmark badge on the flowchart boxes of finished scenes (the text is not changed).
 function applyMenuMarks() {
-  if (!doneLoaded || !progressLoaded) return;
+  if (!doneLoaded) return;
   document.querySelectorAll("a.graph-item").forEach((a) => {
     let path;
     try { path = normPath(new URL(a.getAttribute("href") || "", location.href).pathname); } catch (err) { return; }
-    let state = "";
-    if (doneScenes[path]) state = "done";
-    else if (isDojoLink(a)) state = sceneStarted(path) ? "partial" : (showDojos ? "" : "hidden");
-    const cur = a.getAttribute("data-vnqs-state") || "";
-    if (cur !== state) {
-      if (cur) restoreMark(a);
-      if (state) setMark(a, state);
-    }
-    if (state === "done" && !a.querySelector("[data-vnqs-badge]")) {
-      const badge = document.createElement("span");
-      badge.setAttribute("data-vnqs", "1");
-      badge.setAttribute("data-vnqs-badge", "1");
-      Object.assign(badge.style, {
-        position: "absolute", top: "-9px", right: "-9px", width: "20px", height: "20px",
-        borderRadius: "50%", background: "#2fa84f", color: "#fff", font: "bold 13px/20px sans-serif",
-        textAlign: "center", pointerEvents: "none", boxShadow: "0 0 3px rgba(0,0,0,0.6)"
+    const done = !!doneScenes[path];
+    const marked = a.hasAttribute("data-vnqs-done");
+    if (done) {
+      if (!marked) {
+        markOrig.set(a, {
+          bg: a.style.getPropertyValue("background-color"),
+          shadow: a.style.getPropertyValue("box-shadow"),
+          pos: a.style.getPropertyValue("position")
+        });
+        a.style.setProperty("background-color", DONE_BG, "important");
+        a.style.setProperty("box-shadow", DONE_RING, "important");
+        if (getComputedStyle(a).position === "static") a.style.setProperty("position", "relative");
+        a.setAttribute("data-vnqs-done", "1");
+      }
+      if (!a.querySelector("[data-vnqs-badge]")) {
+        const badge = document.createElement("span");
+        badge.setAttribute("data-vnqs", "1");
+        badge.setAttribute("data-vnqs-badge", "1");
+        Object.assign(badge.style, {
+          position: "absolute", top: "-9px", right: "-9px", width: "20px", height: "20px",
+          borderRadius: "50%", background: "#2fa84f", color: "#fff", font: "bold 13px/20px sans-serif",
+          textAlign: "center", pointerEvents: "none", boxShadow: "0 0 3px rgba(0,0,0,0.6)"
+        });
+        badge.textContent = "\u2713";
+        a.appendChild(badge);
+      }
+    } else if (marked) {
+      const o = markOrig.get(a) || { bg: "", shadow: "", pos: "" };
+      [["background-color", o.bg], ["box-shadow", o.shadow], ["position", o.pos]].forEach(([prop, val]) => {
+        if (val) a.style.setProperty(prop, val); else a.style.removeProperty(prop);
       });
-      badge.textContent = "\u2713";
-      a.appendChild(badge);
+      const badge = a.querySelector("[data-vnqs-badge]");
+      if (badge) badge.remove();
+      a.removeAttribute("data-vnqs-done");
     }
   });
-}
-
-function toggleDojos() {
-  showDojos = !showDojos;
-  store.set("fsnShowDojos", showDojos);
-  applyMenuMarks();
 }
 
 function resetProgress() {
@@ -1510,10 +1474,6 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 store.get("fsnGrayHidden", true, (v) => {
   grayHidden = v !== false;
   applyTextFilter();
-});
-store.get("fsnShowDojos", false, (v) => {
-  showDojos = !!v;
-  applyMenuMarks();
 });
 store.get("fsnReveal", true, (v) => {
   revealOn = v !== false;
