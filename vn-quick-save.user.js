@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.12
+// @version      3.13
 // @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Position display, checkmarks on read scenes, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -757,8 +757,10 @@ if (IS_TOUCH && document.body) {
   document.body.appendChild(fab);
 }
 
-// ---------- small "Settings" box in the top right ----------
-if (document.body) {
+// ---------- small "Settings" box in the top right (computers only) ----------
+// On phones there is no such box: the menu button (bottom left) opens the menu, which has the
+// Settings tab next to Save and Load.
+if (document.body && !IS_TOUCH) {
   const settingsBox = el("div", {
     position: "fixed", top: "16px", right: "16px", zIndex: 2147483645,
     background: "rgba(0,0,0,0.35)", color: "#fff", padding: "5px 10px", borderRadius: "6px",
@@ -767,7 +769,7 @@ if (document.body) {
   });
   settingsBox.appendChild(el("div", { fontWeight: "bold" }, "Settings"));
   settingsBox.appendChild(el("div", { fontSize: "10px", color: "rgba(255,255,255,0.65)" },
-    IS_TOUCH ? "tap here" : "press " + SETTINGS_KEY.toUpperCase()));
+    "press " + SETTINGS_KEY.toUpperCase()));
   swallowEvents(settingsBox);
   settingsBox.addEventListener("click", () => { if (menu && mode === "settings") closeMenu(); else openMenu("settings"); });
   document.body.appendChild(settingsBox);
