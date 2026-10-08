@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.15
-// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Position display, checkmarks on read scenes, hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
+// @version      3.17
+// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (Continue / Settings / Flowchart), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -25,6 +25,7 @@ const LOAD_KEY = "l";
 const GUIDE_KEY = "h"; // hides/shows the route guide
 const SETTINGS_KEY = "g"; // opens the Settings tab
 const SLOTS = 6;
+const TITLE_SCREEN = true; // false = no title screen on the main page
 
 // Intro video (pops up when the page stays unchanged for a while)
 const IDLE_FIRST_MS = 25000;  // page unchanged for this long -> a video's first showing
@@ -402,6 +403,7 @@ function renderSettingsPage(message) {
   g.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
   g.appendChild(button(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); refresh(); }, chip));
   g.appendChild(button(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); refresh(); }, chip));
+  g.appendChild(button(showDojos ? "Hide tiger dojos" : "Show tiger dojos", chipBg, () => { toggleDojos(); refresh(); }, chip));
 
   section("Save codes");
   g = group();
@@ -913,7 +915,10 @@ function unlockScroll() {
 }
 
 // Mouse wheel / touch scrolling
-function stopScrollWhileVideo(e) { if (videoBox) e.preventDefault(); }
+function stopScrollWhileVideo(e) {
+  if (videoBox) { e.preventDefault(); return; }
+  if (titleBox && !inTitleScroll(e.target)) e.preventDefault(); // the title screen's lists may scroll
+}
 window.addEventListener("wheel", stopScrollWhileVideo, { passive: false, capture: true });
 window.addEventListener("touchmove", stopScrollWhileVideo, { passive: false, capture: true });
 
@@ -933,8 +938,10 @@ function closeVideo() {
   try { videoEl.pause(); videoEl.removeAttribute("src"); videoEl.load(); } catch (err) { /* ignore */ }
   videoBox.remove();
   videoBox = null; videoInner = null; videoEl = null;
-  unlockScroll();
-  restorePageAudio();     // the VN's music comes back
+  if (!titleBox) {
+    unlockScroll();
+    restorePageAudio();   // the VN's music comes back
+  }
   idleSince = Date.now(); // the countdown starts over after the window closes
 }
 
@@ -1034,6 +1041,7 @@ function tickIdle() {
     return;
   }
   if (videoBox) { duckPageAudio(); return; } // also silences music that starts during the video
+  if (titleBox) duckPageAudio();            // the title screen keeps the VN silent; the idle opening still plays over it
   if (menu || document.visibilityState !== "visible") { idleSince = Date.now(); return; }
   if (sceneKey() !== null) { idleSince = Date.now(); return; } // no idle openings inside scenes, only on the main menu pages
   const kind = routeKind();
@@ -1117,6 +1125,10 @@ let progressLoaded = false;
 let progressDirty = false;
 let progressTimer = null;
 const markOrig = new WeakMap();
+// Tiger dojos on the flowchart: hidden until you open one, red while unfinished, green when read.
+const PARTIAL_BG = "rgba(190, 40, 40, 0.85)";
+const PARTIAL_RING = "0 0 0 2px #ff5a5a inset, 0 0 8px rgba(255, 90, 90, 0.6)";
+let showDojos = false;    // Settings switch: show every tiger dojo on the flowchart
 
 function normPath(p) {
   return (p || "").replace(/\/+$/, "") || "/";
@@ -1190,48 +1202,79 @@ function trackProgress(spans, activeSet) {
   if (n >= 2 && seen / n >= READ_FRACTION && lastReached) markDone(path);
 }
 
-// Green box + checkmark badge on the flowchart boxes of finished scenes (the text is not changed).
+// A flowchart box is a tiger dojo when its label says so.
+function isDojoLink(a) {
+  return /tiger\s*dojo/i.test(a.textContent || "");
+}
+
+// True once at least one line of the scene has been seen.
+function sceneStarted(path) {
+  if (progressStore[path]) return true;
+  return !!(curScene && curScene.path === path && curScene.visited.some(Boolean));
+}
+
+function restoreMark(a) {
+  const o = markOrig.get(a) || {};
+  [["background-color", o.bg], ["box-shadow", o.shadow], ["position", o.pos], ["display", o.display]].forEach(([prop, val]) => {
+    if (val) a.style.setProperty(prop, val); else a.style.removeProperty(prop);
+  });
+  const badge = a.querySelector("[data-vnqs-badge]");
+  if (badge) badge.remove();
+  a.removeAttribute("data-vnqs-state");
+}
+
+function setMark(a, state) {
+  markOrig.set(a, {
+    bg: a.style.getPropertyValue("background-color"),
+    shadow: a.style.getPropertyValue("box-shadow"),
+    pos: a.style.getPropertyValue("position"),
+    display: a.style.getPropertyValue("display")
+  });
+  if (state === "hidden") {
+    a.style.setProperty("display", "none", "important");
+  } else {
+    const done = state === "done";
+    a.style.setProperty("background-color", done ? DONE_BG : PARTIAL_BG, "important");
+    a.style.setProperty("box-shadow", done ? DONE_RING : PARTIAL_RING, "important");
+    if (getComputedStyle(a).position === "static") a.style.setProperty("position", "relative");
+  }
+  a.setAttribute("data-vnqs-state", state);
+}
+
+// Flowchart boxes: green + checkmark badge for finished scenes. Tiger dojos are hidden until you have
+// opened one, then red while unfinished (green + check once read). The text is not changed.
 function applyMenuMarks() {
-  if (!doneLoaded) return;
+  if (!doneLoaded || !progressLoaded) return;
   document.querySelectorAll("a.graph-item").forEach((a) => {
     let path;
     try { path = normPath(new URL(a.getAttribute("href") || "", location.href).pathname); } catch (err) { return; }
-    const done = !!doneScenes[path];
-    const marked = a.hasAttribute("data-vnqs-done");
-    if (done) {
-      if (!marked) {
-        markOrig.set(a, {
-          bg: a.style.getPropertyValue("background-color"),
-          shadow: a.style.getPropertyValue("box-shadow"),
-          pos: a.style.getPropertyValue("position")
-        });
-        a.style.setProperty("background-color", DONE_BG, "important");
-        a.style.setProperty("box-shadow", DONE_RING, "important");
-        if (getComputedStyle(a).position === "static") a.style.setProperty("position", "relative");
-        a.setAttribute("data-vnqs-done", "1");
-      }
-      if (!a.querySelector("[data-vnqs-badge]")) {
-        const badge = document.createElement("span");
-        badge.setAttribute("data-vnqs", "1");
-        badge.setAttribute("data-vnqs-badge", "1");
-        Object.assign(badge.style, {
-          position: "absolute", top: "-9px", right: "-9px", width: "20px", height: "20px",
-          borderRadius: "50%", background: "#2fa84f", color: "#fff", font: "bold 13px/20px sans-serif",
-          textAlign: "center", pointerEvents: "none", boxShadow: "0 0 3px rgba(0,0,0,0.6)"
-        });
-        badge.textContent = "\u2713";
-        a.appendChild(badge);
-      }
-    } else if (marked) {
-      const o = markOrig.get(a) || { bg: "", shadow: "", pos: "" };
-      [["background-color", o.bg], ["box-shadow", o.shadow], ["position", o.pos]].forEach(([prop, val]) => {
-        if (val) a.style.setProperty(prop, val); else a.style.removeProperty(prop);
+    let state = "";
+    if (doneScenes[path]) state = "done";
+    else if (isDojoLink(a)) state = sceneStarted(path) ? "partial" : (showDojos ? "" : "hidden");
+    const cur = a.getAttribute("data-vnqs-state") || "";
+    if (cur !== state) {
+      if (cur) restoreMark(a);
+      if (state) setMark(a, state);
+    }
+    if (state === "done" && !a.querySelector("[data-vnqs-badge]")) {
+      const badge = document.createElement("span");
+      badge.setAttribute("data-vnqs", "1");
+      badge.setAttribute("data-vnqs-badge", "1");
+      Object.assign(badge.style, {
+        position: "absolute", top: "-9px", right: "-9px", width: "20px", height: "20px",
+        borderRadius: "50%", background: "#2fa84f", color: "#fff", font: "bold 13px/20px sans-serif",
+        textAlign: "center", pointerEvents: "none", boxShadow: "0 0 3px rgba(0,0,0,0.6)"
       });
-      const badge = a.querySelector("[data-vnqs-badge]");
-      if (badge) badge.remove();
-      a.removeAttribute("data-vnqs-done");
+      badge.textContent = "\u2713";
+      a.appendChild(badge);
     }
   });
+}
+
+function toggleDojos() {
+  showDojos = !showDojos;
+  store.set("fsnShowDojos", showDojos);
+  applyMenuMarks();
 }
 
 function resetProgress() {
@@ -1475,6 +1518,10 @@ store.get("fsnGrayHidden", true, (v) => {
   grayHidden = v !== false;
   applyTextFilter();
 });
+store.get("fsnShowDojos", false, (v) => {
+  showDojos = !!v;
+  applyMenuMarks();
+});
 store.get("fsnReveal", true, (v) => {
   revealOn = v !== false;
   applyTextFilter();
@@ -1594,6 +1641,344 @@ store.get("fsnHudHidden", false, (v) => {
   updateHud(true);
 });
 
+// ================= Main menu button =================
+// Sits right under the position display on computers. On phones the display is at the bottom, so the
+// button goes at the very bottom with the display above it (inside the safe area, never cut off).
+let menuBtn = null;
+
+function updateMenuBtn() {
+  if (!document.body) return;
+  const onRoot = location.pathname.replace(/\/+$/, "") === "";
+  if (onRoot) {
+    if (menuBtn) { menuBtn.remove(); menuBtn = null; }
+    return;
+  }
+  const stack = getStack();
+  if (menuBtn && menuBtn.parentNode === stack) return;
+  if (menuBtn) menuBtn.remove();
+  const px = IS_TOUCH ? 13 : 15;
+  menuBtn = el("div", {
+    order: IS_TOUCH ? "-1" : "1", // phones: below the display (the stack grows upwards); computers: under it
+    pointerEvents: "auto", cursor: "pointer", boxSizing: "border-box",
+    background: "rgba(0,0,0,0.45)", color: "#fff", font: "bold " + px + "px sans-serif",
+    padding: (IS_TOUCH ? 10 : 7) + "px " + (IS_TOUCH ? 16 : 14) + "px", borderRadius: "6px",
+    border: "1px solid rgba(255,255,255,0.35)", textShadow: "0 0 3px rgba(0,0,0,0.8)",
+    whiteSpace: "nowrap", maxWidth: "100%", userSelect: "none", webkitUserSelect: "none",
+    touchAction: "manipulation"
+  }, "\u2302 Main menu");
+  swallowEvents(menuBtn);
+  menuBtn.addEventListener("click", () => { location.href = ORIGIN + "/"; });
+  stack.appendChild(menuBtn);
+}
+
+// ================= Main menu (title screen) =================
+// A full-screen title screen over the plain main page (https://fatestaynight.vnovel.org/). It covers
+// the whole page, silences the VN's music, blocks scrolling and ignores Esc and all shortcut keys.
+// Buttons: Continue (big load screen), Settings (big settings screen) and Flowchart (Fate / UBW / HF).
+// It goes away by itself as soon as you leave the main page (Continue, a flowchart, or any link).
+let titleBox = null;
+let titleView = "home"; // "home" | "load" | "settings" | "flow"
+let titleSub = null;    // inside Settings: null | "export" | "import" | "importOk" | "reset"
+let titleMsg = "";
+let titleImport = null; // decoded save code waiting for confirmation
+let titleDraft = "";    // text typed or pasted in the import box
+let titleCompact = false; // short landscape screens (phones held sideways) get a tighter layout
+const FLOW_ROUTES = [
+  { label: "Fate", path: "/fate", color: "#c0392b" },
+  { label: "Unlimited Blade Works", path: "/ubw", color: "#2f6fdb" },
+  { label: "Heaven's Feel", path: "/hf", color: "#8e3bd1" }
+];
+
+function isCompactScreen() {
+  return window.innerWidth > window.innerHeight && window.innerHeight < 520;
+}
+
+function bigButton(label, bg, fn, extra) {
+  const b = el("div", Object.assign({
+    boxSizing: "border-box", width: "100%", textAlign: "center", cursor: "pointer",
+    padding: titleCompact ? "9px 16px" : "16px 20px", borderRadius: titleCompact ? "8px" : "10px",
+    background: bg, color: "#fff",
+    fontWeight: "bold", fontSize: titleCompact ? "16px" : "clamp(17px, 4.6vw, 22px)", letterSpacing: "1px",
+    border: "1px solid rgba(255,255,255,0.28)", boxShadow: "0 2px 10px rgba(0,0,0,0.45)",
+    userSelect: "none", webkitUserSelect: "none", touchAction: "manipulation"
+  }, extra || {}), label);
+  b.addEventListener("mouseenter", () => { b.style.filter = "brightness(1.3)"; });
+  b.addEventListener("mouseleave", () => { b.style.filter = ""; });
+  b.addEventListener("click", fn);
+  return b;
+}
+
+function inTitleScroll(t) {
+  return !!(t && t.closest && t.closest("[data-vnqs-scroll]"));
+}
+
+function openTitle() {
+  if (titleBox || !document.body) return;
+  if (menu) closeMenu();
+  if (videoBox) closeVideo();
+  titleView = "home"; titleSub = null; titleMsg = ""; titleImport = null; titleDraft = "";
+  titleCompact = isCompactScreen();
+  titleBox = el("div", {
+    position: "fixed", top: "0", left: "0", right: "0", bottom: "0", zIndex: 2147483647,
+    boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center",
+    padding: "max(10px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(10px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px))",
+    background: "radial-gradient(ellipse at 50% 20%, #1d2c52 0%, #0b1020 55%, #05070d 100%)",
+    color: "#fff", font: "16px sans-serif", overflow: "hidden", touchAction: "none"
+  });
+  swallowEvents(titleBox);
+  titleBox.addEventListener("mousedown", (ev) => { if (ev.button === 1) ev.preventDefault(); }); // no middle-click autoscroll
+  titleBox.addEventListener("contextmenu", (ev) => { if (!isTyping(ev)) ev.preventDefault(); });
+  document.body.appendChild(titleBox);
+  lockScroll();
+  duckPageAudio();
+  renderTitle();
+}
+
+function closeTitle() {
+  if (!titleBox) return;
+  titleBox.remove();
+  titleBox = null;
+  titleImport = null;
+  if (!videoBox) { unlockScroll(); restorePageAudio(); }
+  idleSince = Date.now();
+}
+
+function setTitleView(v) {
+  titleView = v; titleSub = null; titleMsg = ""; titleImport = null; titleDraft = "";
+  renderTitle();
+}
+
+function titleHeader(wrap, text, color) {
+  wrap.appendChild(el("div", {
+    textAlign: "center", fontWeight: "bold", fontSize: titleCompact ? "20px" : "clamp(22px, 6vw, 32px)", letterSpacing: "1px",
+    color: color || "#fff", margin: "0 0 2px", flex: "0 0 auto"
+  }, text));
+}
+
+function titleBack(wrap, fn) {
+  wrap.appendChild(bigButton("\u2190 Back", "rgba(255,255,255,0.1)", fn || (() => setTitleView("home")), { flex: "0 0 auto" }));
+}
+
+function renderTitle() {
+  if (!titleBox) return;
+  titleBox.textContent = "";
+  const wrap = el("div", {
+    display: "flex", flexDirection: "column", alignItems: "stretch", gap: titleCompact ? "8px" : "14px",
+    width: "100%", maxWidth: titleView === "home" || titleView === "flow" ? "440px" : "640px",
+    maxHeight: "100%", minHeight: "0"
+  });
+  titleBox.appendChild(wrap);
+
+  if (titleView === "home") {
+    const title = el("div", {
+      textAlign: "center", fontFamily: "Georgia, 'Times New Roman', serif", fontWeight: "bold",
+      fontSize: titleCompact ? "clamp(28px, 6vw, 46px)" : "clamp(34px, 10vw, 64px)", lineHeight: "1.1", letterSpacing: "2px",
+      textShadow: "0 0 22px rgba(90,150,255,0.65)", margin: titleCompact ? "0" : "0 0 18px"
+    }, "Fate/stay night");
+    const btns = [
+      bigButton("Continue", "rgba(30,111,255,0.55)", () => setTitleView("load")),
+      bigButton("Settings", "rgba(95,102,114,0.55)", () => setTitleView("settings")),
+      bigButton("Flowchart", "rgba(176,0,0,0.5)", () => setTitleView("flow"))
+    ];
+    if (titleCompact) {
+      // phone held sideways: title on the left, buttons on the right, everything fits the short screen
+      wrap.style.flexDirection = "row"; wrap.style.alignItems = "center"; wrap.style.gap = "28px"; wrap.style.maxWidth = "760px";
+      title.style.flex = "1 1 0";
+      const col = el("div", { display: "flex", flexDirection: "column", gap: "8px", flex: "0 0 min(300px, 44vw)" });
+      btns.forEach((b) => col.appendChild(b));
+      wrap.appendChild(title);
+      wrap.appendChild(col);
+    } else {
+      wrap.appendChild(title);
+      btns.forEach((b) => wrap.appendChild(b));
+    }
+    return;
+  }
+
+  if (titleView === "flow") {
+    titleHeader(wrap, "Choose a route");
+    FLOW_ROUTES.forEach((r) => {
+      wrap.appendChild(bigButton(r.label, r.color, () => { location.href = ORIGIN + r.path; }));
+    });
+    titleBack(wrap);
+    return;
+  }
+
+  if (titleView === "load") {
+    titleHeader(wrap, "Continue", "#6fb0ff");
+    const panel = el("div", {
+      overflowY: "auto", overscrollBehavior: "contain", flex: "1 1 auto", minHeight: "0",
+      display: "flex", flexDirection: "column", gap: "8px", paddingRight: "2px"
+    });
+    panel.setAttribute("data-vnqs-scroll", "1");
+    wrap.appendChild(panel);
+    const msg = el("div", { color: "#ffb35a", fontSize: "14px", textAlign: "center", minHeight: "18px", flex: "0 0 auto" }, titleMsg);
+    wrap.appendChild(msg);
+    titleBack(wrap);
+    getData((slots, auto) => {
+      if (!titleBox || titleView !== "load") return;
+      const row = (label, slot, extra, name) => {
+        const r = el("div", Object.assign({
+          display: "flex", alignItems: "center", gap: "14px", padding: titleCompact ? "10px 14px" : "16px 18px", borderRadius: "10px",
+          cursor: "pointer", background: "rgba(60,130,255,0.16)", fontSize: titleCompact ? "15px" : "clamp(15px, 4vw, 18px)",
+          border: "1px solid rgba(255,255,255,0.14)", flex: "0 0 auto"
+        }, extra || {}));
+        r.appendChild(el("span", { fontWeight: "bold", minWidth: "62px", color: "#9cc6ff" }, label));
+        r.appendChild(el("span", { flex: "1", color: slot ? "#fff" : "#8a8f98", overflowWrap: "anywhere" },
+          slot ? prettyLabel(slot.url) : "Empty"));
+        r.addEventListener("mouseenter", () => { r.style.filter = "brightness(1.25)"; });
+        r.addEventListener("mouseleave", () => { r.style.filter = ""; });
+        r.addEventListener("click", () => {
+          if (!slot) { titleMsg = name + " is empty."; msg.textContent = titleMsg; return; }
+          if (!isSafeUrl(slot.url)) { titleMsg = name + " can't be loaded."; msg.textContent = titleMsg; return; }
+          toast("Loading " + name + "\u2026");
+          location.href = slot.url;
+        });
+        panel.appendChild(r);
+      };
+      row("Auto", auto, { outline: "2px solid " + AUTO_COLOR, background: "rgba(193,60,255,0.18)" }, "the auto-save");
+      slots.forEach((s, i) => row("Slot " + (i + 1), s, null, "slot " + (i + 1)));
+    });
+    return;
+  }
+
+  // ----- settings -----
+  titleHeader(wrap, "Settings", "#c4c8cf");
+  const panel = el("div", {
+    overflowY: "auto", overscrollBehavior: "contain", flex: "1 1 auto", minHeight: "0",
+    display: "flex", flexDirection: "column", gap: titleCompact ? "6px" : "10px", paddingRight: "2px"
+  });
+  panel.setAttribute("data-vnqs-scroll", "1");
+  wrap.appendChild(panel);
+  const chipBg = "rgba(255,255,255,0.12)";
+  const chip = { fontWeight: "normal", fontSize: titleCompact ? "15px" : "clamp(15px, 4vw, 18px)", padding: titleCompact ? "9px 8px" : "14px 10px", letterSpacing: "0" };
+  const section = (t) => panel.appendChild(el("div", {
+    color: "#8a8f98", fontSize: "12px", textTransform: "uppercase", letterSpacing: "0.6px", margin: "8px 2px 0"
+  }, t));
+  const grid = () => {
+    const g = el("div", { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "8px" });
+    panel.appendChild(g);
+    return g;
+  };
+  const note = (t, color) => panel.appendChild(el("div", { color: color || "#ffb35a", fontSize: "14px", textAlign: "center" }, t));
+  const yesNo = (yesLabel, yesFn, noFn) => {
+    const g = el("div", { display: "flex", gap: "10px" });
+    g.appendChild(bigButton(yesLabel, "#b00000", yesFn, { flex: "1" }));
+    g.appendChild(bigButton("No", "#444", noFn, { flex: "1" }));
+    panel.appendChild(g);
+  };
+  const subBack = () => { titleSub = null; titleMsg = ""; titleImport = null; renderTitle(); };
+
+  if (titleSub === "export") {
+    section("Your save code");
+    note("Copy it, then paste it into \"Import code\" on another device. It holds your auto-save and slots 1-" + SLOTS + ".", "#aaa");
+    const ta = codeBox("", true);
+    Object.assign(ta.style, { height: titleCompact ? "84px" : "130px", fontSize: "14px" });
+    panel.appendChild(ta);
+    const m = el("div", { color: "#ffb35a", fontSize: "14px", textAlign: "center", minHeight: "18px" }, titleMsg);
+    panel.appendChild(m);
+    getData((slots, auto) => {
+      const code = encodeSaves(slots, auto);
+      ta.value = code;
+      panel.insertBefore(bigButton("Copy", "#1e6fff", () => {
+        copyText(code, ta, (ok) => { titleMsg = ok ? "Copied \u2714" : "Couldn't copy. Select the code and copy it manually."; m.textContent = titleMsg; });
+      }, chip), m.nextSibling);
+    });
+    titleBack(wrap, subBack);
+    return;
+  }
+
+  if (titleSub === "import") {
+    section("Import a save code");
+    note("Paste a code you exported from this script.", "#aaa");
+    const ta = codeBox(titleDraft, false);
+    Object.assign(ta.style, { height: titleCompact ? "84px" : "130px", fontSize: "14px" });
+    ta.placeholder = CODE_PREFIX + "...";
+    ta.addEventListener("input", () => { titleDraft = ta.value; });
+    panel.appendChild(ta);
+    if (titleMsg) note(titleMsg);
+    panel.appendChild(bigButton("Import", "#1e6fff", () => {
+      titleDraft = ta.value;
+      const data = decodeSaves(titleDraft);
+      if (!data) { titleMsg = "That code isn't valid. Make sure it was copied completely."; renderTitle(); return; }
+      titleImport = data; titleSub = "importOk"; titleMsg = ""; renderTitle();
+    }, chip));
+    titleBack(wrap, subBack);
+    if (!IS_TOUCH) ta.focus();
+    return;
+  }
+
+  if (titleSub === "importOk" && titleImport) {
+    const n = titleImport.slots.filter(Boolean).length;
+    section("Import saves?");
+    note("The code has " + n + " slot save" + (n === 1 ? "" : "s") + (titleImport.auto ? " and an auto-save." : "."), "#fff");
+    note("This replaces ALL your current saves, including the auto-save.");
+    yesNo("Yes, import", () => {
+      const d = titleImport;
+      store.set("fsnSlots", d.slots);
+      store.set("fsnAuto", d.auto);
+      const c = d.slots.filter(Boolean).length + (d.auto ? 1 : 0);
+      titleImport = null; titleSub = null; titleMsg = "Imported " + c + " save" + (c === 1 ? "" : "s") + " \u2714";
+      renderTitle();
+    }, subBack);
+    return;
+  }
+
+  if (titleSub === "reset") {
+    section("Reset all checkmarks?");
+    note("Every green checkmark on the flowcharts and your reading progress in all scenes will be cleared.", "#fff");
+    note("This can't be undone.");
+    yesNo("Yes, reset", () => {
+      resetProgress();
+      titleSub = null; titleMsg = "Checkmarks reset \u2714";
+      renderTitle();
+    }, subBack);
+    return;
+  }
+
+  section("Display and text");
+  let g = grid();
+  g.appendChild(bigButton(guideHidden ? "Show guide" : "Hide guide", chipBg, () => { toggleGuide(true); renderTitle(); }, chip));
+  g.appendChild(bigButton(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); renderTitle(); }, chip));
+  g.appendChild(bigButton(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); renderTitle(); }, chip));
+  g.appendChild(bigButton(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); renderTitle(); }, chip));
+  g.appendChild(bigButton(showDojos ? "Hide tiger dojos" : "Show tiger dojos", chipBg, () => { toggleDojos(); renderTitle(); }, chip));
+  section("Save codes");
+  g = grid();
+  g.appendChild(bigButton("Export code", chipBg, () => { titleSub = "export"; titleMsg = ""; renderTitle(); }, chip));
+  g.appendChild(bigButton("Import code", chipBg, () => { titleSub = "import"; titleMsg = ""; titleDraft = ""; renderTitle(); }, chip));
+  section("Progress");
+  panel.appendChild(bigButton("Reset checkmarks", "#8a1010", () => { titleSub = "reset"; titleMsg = ""; renderTitle(); }, chip));
+  if (titleMsg) note(titleMsg);
+  titleBack(wrap);
+}
+
+// Esc, shortcut keys, arrows, space... never reach the game or our small menus while the title screen is open.
+// (Typing inside the save-code box still works, and Ctrl/Alt/Cmd shortcuts and F-keys are left alone.)
+function blockKeysWhileTitle(e) {
+  if (!titleBox || videoBox) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || /^F\d+$/.test(e.key)) return;
+  if (isTyping(e) && titleBox.contains(e.target)) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+}
+["keydown", "keyup", "keypress"].forEach((t) => window.addEventListener(t, blockKeysWhileTitle, true));
+
+function relayoutTitle() {
+  if (!titleBox) return;
+  const c = isCompactScreen();
+  if (c !== titleCompact) { titleCompact = c; renderTitle(); }
+}
+window.addEventListener("resize", relayoutTitle);
+window.addEventListener("orientationchange", () => setTimeout(relayoutTitle, 150));
+
+// Shown while you are on the plain main page ("/"); removed when you go anywhere else.
+function updateTitle() {
+  if (!TITLE_SCREEN) return;
+  if (currentPath() === "/") openTitle();
+  else if (titleBox) closeTitle();
+}
+
 // ================= Route guide =================
 // Key = path + #hash of the page where a choice appears.
 const GUIDES = {
@@ -1643,7 +2028,7 @@ function updateGuide(force) {
     background: "rgba(15,15,15,0.94)", color: "#fff", padding: "12px 14px",
     font: "16px sans-serif", maxWidth: "min(300px, 80vw)", boxSizing: "border-box",
     borderRadius: "8px", boxShadow: "0 4px 18px rgba(0,0,0,0.5)",
-    border: "1px solid #e0a800", pointerEvents: "none"
+    border: "1px solid #e0a800", pointerEvents: "none", order: "2"
   });
   guideBox.appendChild(el("div", { fontWeight: "bold", fontSize: "18px", marginBottom: "8px", color: "#ffd24d" }, g.title));
   g.rows.forEach(([label, route]) => {
@@ -1675,7 +2060,9 @@ store.get("fsnGuideHidden", false, (v) => {
 });
 
 function tick() {
+  updateTitle();
   updateHud(false);
+  updateMenuBtn();
   applyTextFilter();
   updateGuide(false); // the site is a single-page app, so we poll for changes
   watchScene();
