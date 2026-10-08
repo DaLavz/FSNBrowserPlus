@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.25
+// @version      3.27
 // @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (Continue / Settings / Flowchart), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -38,6 +38,9 @@ const VIDEO_BASE = "https://dalavz.github.io/FSNBrowserPlus/videos/";
 // The logo shown on the title screen. Upload a PNG (transparent background works best) to this address.
 // If it can't be loaded the plain text title "Fate/stay night" is shown instead. "" = always text.
 const TITLE_IMAGE = "https://dalavz.github.io/FSNBrowserPlus/images/title.png";
+// The title screen's background picture. It is stretched to cover any screen (cropped, never squashed).
+// If it can't be loaded the dark blue gradient is used. "" = always the gradient.
+const TITLE_BACKGROUND = "https://dalavz.github.io/FSNBrowserPlus/images/ta_back_fate.webp";
 const VIDEOS = {
   fate: VIDEO_BASE + "fate.mp4",
   ubw: VIDEO_BASE + "ubw.mp4",
@@ -275,9 +278,9 @@ function renderMenu(slots, auto, message) {
   // ----- export code screen -----
   if (view === "export") {
     const code = encodeSaves(slots, auto);
-    menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "6px", color: theme.title }, "Your save code"));
+    menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "6px", color: theme.title }, "Export saves"));
     menu.appendChild(el("div", { fontSize: "12px", color: "#aaa", marginBottom: "8px" },
-      "Copy it, then paste it into \"Import code\" on another device. It holds your auto-save and slots 1-" + SLOTS + "."));
+      "Copy it, then paste it into \"Import saves\" on another device. It holds your auto-save and slots 1-" + SLOTS + "."));
     const ta = codeBox(code, true);
     menu.appendChild(ta);
     if (message) menu.appendChild(el("div", { marginTop: "6px", color: "#ffb35a", fontSize: "12px" }, message));
@@ -293,7 +296,7 @@ function renderMenu(slots, auto, message) {
 
   // ----- import code screen -----
   if (view === "import") {
-    menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "6px", color: theme.title }, "Import a save code"));
+    menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "6px", color: theme.title }, "Import saves"));
     menu.appendChild(el("div", { fontSize: "12px", color: "#aaa", marginBottom: "8px" },
       "Paste a code you exported from this script."));
     const ta = codeBox(importDraft, false);
@@ -411,10 +414,10 @@ function renderSettingsPage(message) {
   g.appendChild(button(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); refresh(); }, chip));
   g.appendChild(button(showDojos ? "Hide tiger dojos" : "Show tiger dojos", chipBg, () => { toggleDojos(); refresh(); }, chip));
 
-  section("Save codes");
+  section("Saves");
   g = group();
-  g.appendChild(button("Export code", chipBg, () => { view = "export"; refresh(); }, chip));
-  g.appendChild(button("Import code", chipBg, () => { view = "import"; importDraft = ""; refresh(); }, chip));
+  g.appendChild(button("Export saves", chipBg, () => { view = "export"; refresh(); }, chip));
+  g.appendChild(button("Import saves", chipBg, () => { view = "import"; importDraft = ""; refresh(); }, chip));
 
   section("Progress");
   g = group();
@@ -1878,7 +1881,7 @@ function openTitle() {
     position: "fixed", top: "0", left: "0", right: "0", bottom: "0", zIndex: 2147483647,
     boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center",
     padding: "max(10px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(10px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px))",
-    background: "radial-gradient(ellipse at 50% 20%, #1d2c52 0%, #0b1020 55%, #05070d 100%)",
+    background: TITLE_BASE_BG,
     color: "#fff", font: "16px sans-serif", overflow: "hidden", touchAction: "none"
   });
   swallowEvents(titleBox);
@@ -1888,6 +1891,7 @@ function openTitle() {
   lockScroll();
   duckPageAudio();
   renderTitle();
+  loadTitleBackground();
 }
 
 function closeTitle() {
@@ -1920,19 +1924,52 @@ let titleImgTriedData = false;
 let titleImgFailed = false;
 
 // Some pages refuse pictures from other sites. Tampermonkey can still download the file and hand it over as a data: address.
-function loadTitleImageAsData(cb) {
+function fetchAsDataUrl(url, cb) {
   if (typeof GM_xmlhttpRequest !== "function") { cb(null); return; }
+  const ext = (url.split("?")[0].split(".").pop() || "").toLowerCase();
+  const mime = ext === "webp" ? "image/webp" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : "image/png";
   GM_xmlhttpRequest({
-    method: "GET", url: TITLE_IMAGE, responseType: "arraybuffer", timeout: 20000,
+    method: "GET", url, responseType: "arraybuffer", timeout: 20000,
     onerror: () => cb(null), ontimeout: () => cb(null),
     onload: (r) => {
       if (r.status !== 200 || !r.response) { cb(null); return; }
       const u8 = new Uint8Array(r.response);
       let bin = "";
       for (let i = 0; i < u8.length; i += 8192) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
-      cb("data:image/png;base64," + btoa(bin));
+      cb("data:" + mime + ";base64," + btoa(bin));
     }
   });
+}
+
+// ---- background picture ----
+const TITLE_BASE_BG = "radial-gradient(ellipse at 50% 20%, #1d2c52 0%, #0b1020 55%, #05070d 100%)";
+let titleBgSrc = null;     // the address that works (plain, or a data: copy)
+let titleBgFailed = false;
+
+function setTitleBg(box, src) {
+  // soft dark edges (keeps the text readable), then the picture covering the whole screen, then the gradient underneath
+  box.style.backgroundImage = "radial-gradient(ellipse at 50% 55%, rgba(0,0,0,0) 35%, rgba(0,0,0,0.38) 100%), url(\"" + src + "\"), " + TITLE_BASE_BG;
+  box.style.backgroundSize = "auto, cover, auto";
+  box.style.backgroundPosition = "center, 50% 80%, center"; // keeps the bright glow at the bottom in view
+  box.style.backgroundRepeat = "no-repeat";
+}
+
+function loadTitleBackground() {
+  if (!TITLE_BACKGROUND || titleBgFailed) return;
+  const apply = (src) => { titleBgSrc = src; if (titleBox) setTitleBg(titleBox, src); };
+  if (titleBgSrc) { apply(titleBgSrc); return; }
+  const probe = new Image();
+  probe.onload = () => apply(TITLE_BACKGROUND);
+  probe.onerror = () => {
+    fetchAsDataUrl(TITLE_BACKGROUND, (d) => {
+      if (!d) { titleBgFailed = true; return; }
+      const p2 = new Image();
+      p2.onload = () => apply(d);
+      p2.onerror = () => { titleBgFailed = true; };
+      p2.src = d;
+    });
+  };
+  probe.src = TITLE_BACKGROUND;
 }
 
 // The title picture, or null (then the text title is used).
@@ -1957,7 +1994,7 @@ function titleLogo() {
   img.addEventListener("error", () => {
     if (!titleImgTriedData) {
       titleImgTriedData = true;
-      loadTitleImageAsData((d) => { if (d) { titleImgSrc = d; img.src = d; } else useText(); });
+      fetchAsDataUrl(TITLE_IMAGE, (d) => { if (d) { titleImgSrc = d; img.src = d; } else useText(); });
     } else {
       useText();
     }
@@ -2084,8 +2121,8 @@ function renderTitle() {
   const subBack = () => { titleSub = null; titleMsg = ""; titleImport = null; renderTitle(); };
 
   if (titleSub === "export") {
-    section("Your save code");
-    note("Copy it, then paste it into \"Import code\" on another device. It holds your auto-save and slots 1-" + SLOTS + ".", "#aaa");
+    section("Export saves");
+    note("Copy it, then paste it into \"Import saves\" on another device. It holds your auto-save and slots 1-" + SLOTS + ".", "#aaa");
     const ta = codeBox("", true);
     Object.assign(ta.style, { height: titleCompact ? "84px" : "130px", fontSize: "14px" });
     panel.appendChild(ta);
@@ -2103,7 +2140,7 @@ function renderTitle() {
   }
 
   if (titleSub === "import") {
-    section("Import a save code");
+    section("Import saves");
     note("Paste a code you exported from this script.", "#aaa");
     const ta = codeBox(titleDraft, false);
     Object.assign(ta.style, { height: titleCompact ? "84px" : "130px", fontSize: "14px" });
@@ -2157,10 +2194,10 @@ function renderTitle() {
   g.appendChild(bigButton(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); renderTitle(); }, chip));
   g.appendChild(bigButton(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); renderTitle(); }, chip));
   g.appendChild(bigButton(showDojos ? "Hide tiger dojos" : "Show tiger dojos", chipBg, () => { toggleDojos(); renderTitle(); }, chip));
-  section("Save codes");
+  section("Saves");
   g = grid();
-  g.appendChild(bigButton("Export code", chipBg, () => { titleSub = "export"; titleMsg = ""; renderTitle(); }, chip));
-  g.appendChild(bigButton("Import code", chipBg, () => { titleSub = "import"; titleMsg = ""; titleDraft = ""; renderTitle(); }, chip));
+  g.appendChild(bigButton("Export saves", chipBg, () => { titleSub = "export"; titleMsg = ""; renderTitle(); }, chip));
+  g.appendChild(bigButton("Import saves", chipBg, () => { titleSub = "import"; titleMsg = ""; titleDraft = ""; renderTitle(); }, chip));
   section("Progress");
   panel.appendChild(bigButton("Reset checkmarks", "#8a1010", () => { titleSub = "reset"; titleMsg = ""; renderTitle(); }, chip));
   if (titleMsg) note(titleMsg);
@@ -2196,7 +2233,7 @@ function updateTitle() {
 // ================= Flowchart positioning =================
 // The flowchart pages (/fate, /ubw, /hf) show one big chart made of day squares. When one of them opens
 // the page scrolls to the right place by itself:
-//   - the Prologue button: the very top (the Prologue square)
+//   - the Prologue button: the Prologue square, centred on its middle box ("1 day ago - Prologue")
 //   - a route page: the last scene you opened in that route, or else that route's first big square
 // It runs once on arrival and stops as soon as you scroll, touch or press a key yourself.
 const FLOW_PAGES = { "/fate": "fate", "/ubw": "ubw", "/hf": "hf" };
@@ -2223,7 +2260,9 @@ function stopFlowJump() {
 }
 
 function flowTarget(route, mode) {
-  if (mode === "top") {
+  if (mode === "top") { // Prologue button: centre the middle Prologue box ("1 day ago - Prologue"), so the whole square is in view
+    const mid = document.querySelector('a.graph-item[href="/prologue/2"]');
+    if (mid) return { el: mid, block: "center" };
     return { el: document.querySelector('.section-day[route="' + FLOW_PROLOGUE_ATTR + '"]') || document.querySelector(".section-day"), block: "top" };
   }
   const last = lastScenes[route];
