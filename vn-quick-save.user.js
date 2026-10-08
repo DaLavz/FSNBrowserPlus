@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.17
+// @version      3.19
 // @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (Continue / Settings / Flowchart), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -986,8 +986,10 @@ function openVideo(kind) {
   v.addEventListener("error", () => {
     if (videoEl !== v) return;
     failedRoutes[kind] = true;
+    const code = v.error ? v.error.code : 0; // 1 aborted, 2 network, 3 decode, 4 not found / blocked / unsupported
+    console.warn("[VN script] intro video failed to load:", url, "| MediaError code", code, v.error && v.error.message);
     closeVideo();
-    toast("Intro video couldn't be loaded.");
+    toast("Intro video couldn't be loaded (error " + code + "). Details are in the browser console (F12).");
   });
 
   // the X button
@@ -1215,7 +1217,7 @@ function sceneStarted(path) {
 
 function restoreMark(a) {
   const o = markOrig.get(a) || {};
-  [["background-color", o.bg], ["box-shadow", o.shadow], ["position", o.pos], ["display", o.display]].forEach(([prop, val]) => {
+  [["background-color", o.bg], ["box-shadow", o.shadow], ["position", o.pos], ["display", o.display], ["visibility", o.vis], ["pointer-events", o.pe]].forEach(([prop, val]) => {
     if (val) a.style.setProperty(prop, val); else a.style.removeProperty(prop);
   });
   const badge = a.querySelector("[data-vnqs-badge]");
@@ -1228,10 +1230,14 @@ function setMark(a, state) {
     bg: a.style.getPropertyValue("background-color"),
     shadow: a.style.getPropertyValue("box-shadow"),
     pos: a.style.getPropertyValue("position"),
-    display: a.style.getPropertyValue("display")
+    display: a.style.getPropertyValue("display"),
+    vis: a.style.getPropertyValue("visibility"),
+    pe: a.style.getPropertyValue("pointer-events")
   });
   if (state === "hidden") {
-    a.style.setProperty("display", "none", "important");
+    // invisible and unclickable, but it keeps its place so the other boxes (and the site's arrows) don't move
+    a.style.setProperty("visibility", "hidden", "important");
+    a.style.setProperty("pointer-events", "none", "important");
   } else {
     const done = state === "done";
     a.style.setProperty("background-color", done ? DONE_BG : PARTIAL_BG, "important");
@@ -1268,6 +1274,46 @@ function applyMenuMarks() {
       badge.textContent = "\u2713";
       a.appendChild(badge);
     }
+  });
+  syncDojoLines();
+}
+
+// The flowchart arrows are <line class="graph-svg-line"> elements the site draws from the boxes' positions
+// (from the bottom centre of one box to the top centre of the next). Arrows that start or end at a hidden
+// tiger dojo are hidden too, so nothing points at an empty gap. They come back when the dojo is revealed.
+function svgPoint(line, x, y) {
+  let m = null;
+  try { m = line.getScreenCTM(); } catch (err) { /* not rendered */ }
+  if (m) return { x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f };
+  const svg = line.ownerSVGElement || line.parentNode;
+  const r = svg.getBoundingClientRect();
+  return { x: r.left + x, y: r.top + y };
+}
+
+function syncDojoLines() {
+  const lines = document.querySelectorAll("line.graph-svg-line");
+  if (!lines.length) return;
+  const spots = [];
+  document.querySelectorAll('a.graph-item[data-vnqs-state="hidden"]').forEach((a) => {
+    const r = a.getBoundingClientRect();
+    if (r.width || r.height) spots.push({ cx: r.left + r.width / 2, top: r.top, bottom: r.bottom });
+  });
+  const TX = 7, TY = 9; // tolerance in pixels
+  lines.forEach((ln) => {
+    let hide = false;
+    if (spots.length) {
+      const x1 = parseFloat(ln.getAttribute("x1")), y1 = parseFloat(ln.getAttribute("y1"));
+      const x2 = parseFloat(ln.getAttribute("x2")), y2 = parseFloat(ln.getAttribute("y2"));
+      if (![x1, y1, x2, y2].some(isNaN)) {
+        const a = svgPoint(ln, x1, y1), b = svgPoint(ln, x2, y2);
+        hide = spots.some((d) =>
+          (Math.abs(b.x - d.cx) <= TX && Math.abs(b.y - d.top) <= TY) ||    // arrow ending at the dojo
+          (Math.abs(a.x - d.cx) <= TX && Math.abs(a.y - d.bottom) <= TY));  // arrow starting at the dojo
+      }
+    }
+    const was = ln.getAttribute("data-vnqs-hid") === "1";
+    if (hide && !was) { ln.setAttribute("data-vnqs-hid", "1"); ln.style.setProperty("display", "none", "important"); }
+    else if (!hide && was) { ln.removeAttribute("data-vnqs-hid"); ln.style.removeProperty("display"); }
   });
 }
 
