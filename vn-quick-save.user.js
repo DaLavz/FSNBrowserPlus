@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.19
+// @version      3.22
 // @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (Continue / Settings / Flowchart), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -30,6 +30,7 @@ const TITLE_SCREEN = true; // false = no title screen on the main page
 // Intro video (pops up when the page stays unchanged for a while)
 const IDLE_FIRST_MS = 25000;  // page unchanged for this long -> a video's first showing
 const IDLE_REPEAT_MS = 40000; // once a video was watched, this long before it shows again
+const IDLE_ON_FLOWCHARTS = true; // idle openings also play on the flowchart pages (/fate, /ubw, /hf); false = only on the main menu
 const CLOSE_WHEN_ENDED = true; // close the window by itself when the video finishes
 const VIDEO_BASE = "https://dalavz.github.io/FSNBrowserPlus/videos/";
 const VIDEOS = {
@@ -859,8 +860,20 @@ store.get("fsnVideosSeen", {}, (v) => {
   seenRoutes = v && typeof v === "object" ? v : {};
 });
 
+// The opening that plays when you stay idle on the main menu: the one of the arc whose day-4 scene you
+// reached most recently ("fate", "ubw" or "hf"). Nothing plays idly until you have reached one of them.
+let idleKind = null;
+store.get("fsnIdleKind", null, (v) => {
+  idleKind = v === "fate" || v === "ubw" || v === "hf" ? v : null;
+});
+function setIdleKind(kind) {
+  if (idleKind === kind) return;
+  idleKind = kind;
+  store.set("fsnIdleKind", kind);
+}
+
 // Which route's video belongs to the current page: "fate", "ubw", "hf" or null.
-// Works inside scenes (/ubw/6th-day/13) and on the main menu (/ = Fate, /fate, /ubw, /hf).
+// Works inside scenes (e.g. /ubw/4th-day/0) and on the main menu (/ = Fate, /fate, /ubw, /hf).
 function routeKind() {
   const seg = location.pathname.split("/").filter(Boolean);
   if (seg.length === 0) return "fate"; // the plain main page plays the Fate intro
@@ -1046,7 +1059,9 @@ function tickIdle() {
   if (titleBox) duckPageAudio();            // the title screen keeps the VN silent; the idle opening still plays over it
   if (menu || document.visibilityState !== "visible") { idleSince = Date.now(); return; }
   if (sceneKey() !== null) { idleSince = Date.now(); return; } // no idle openings inside scenes, only on the main menu pages
-  const kind = routeKind();
+  const seg = location.pathname.split("/").filter(Boolean);
+  if (seg.length > 0 && (!IDLE_ON_FLOWCHARTS || !routeKind())) return; // "/" = the main menu; /fate, /ubw, /hf = flowcharts
+  const kind = idleKind; // the most recently reached arc, not the route of the page you are on
   if (!kind || failedRoutes[kind]) return;
   const wait = seenRoutes[kind] ? IDLE_REPEAT_MS : IDLE_FIRST_MS;
   if (Date.now() - idleSince < wait) return;
@@ -1055,10 +1070,11 @@ function tickIdle() {
 
 // ----- openings that play by themselves when you arrive at a certain page (like the real game) -----
 // They play every time you get there, no matter how often. The page's #hash is ignored.
+// Getting there also makes that arc's opening the one that plays when you stay idle on the main menu.
 const AUTO_VIDEOS = [
   { path: "/fate/4th-day/0", kind: "fate" },
-  { path: "/ubw/6th-day/13", kind: "ubw" },
-  { path: "/hf/6th-day/0", kind: "hf" }
+  { path: "/ubw/4th-day/0", kind: "ubw" },
+  { path: "/hf/4th-day/11", kind: "hf" }
 ];
 let lastPath = null;
 
@@ -1071,8 +1087,11 @@ function checkArrival() {
   if (path === lastPath) return;
   const firstCheck = lastPath === null;
   lastPath = path;
+  recordLastScene(path);
   const hit = AUTO_VIDEOS.find((a) => a.path === path);
-  if (!hit || failedRoutes[hit.kind]) return;
+  if (!hit) return;
+  setIdleKind(hit.kind); // reaching an arc's day 4 makes its opening the idle one, even if you skip it or load a save here
+  if (failedRoutes[hit.kind]) return;
   // opened straight into the middle of that part (e.g. loading a save): don't replay the opening
   if (firstCheck && location.hash) return;
   if (videoBox) closeVideo();
@@ -1730,8 +1749,9 @@ let titleImport = null; // decoded save code waiting for confirmation
 let titleDraft = "";    // text typed or pasted in the import box
 let titleCompact = false; // short landscape screens (phones held sideways) get a tighter layout
 const FLOW_ROUTES = [
-  { label: "Fate", path: "/fate", color: "#c0392b" },
-  { label: "Unlimited Blade Works", path: "/ubw", color: "#2f6fdb" },
+  { label: "Prologue", path: "/fate", color: "#5f6672", jump: "prologue" }, // the Prologue square sits at the top of the Fate chart
+  { label: "Fate", path: "/fate", color: "#2f6fdb" },
+  { label: "Unlimited Blade Works", path: "/ubw", color: "#c0392b" },
   { label: "Heaven's Feel", path: "/hf", color: "#8e3bd1" }
 ];
 
@@ -1844,7 +1864,10 @@ function renderTitle() {
   if (titleView === "flow") {
     titleHeader(wrap, "Choose a route");
     FLOW_ROUTES.forEach((r) => {
-      wrap.appendChild(bigButton(r.label, r.color, () => { location.href = ORIGIN + r.path; }));
+      wrap.appendChild(bigButton(r.label, r.color, () => {
+        if (r.jump) store.set("fsnJump", { type: r.jump, t: Date.now() }); // tells the flowchart page to open at the top
+        location.href = ORIGIN + r.path;
+      }));
     });
     titleBack(wrap);
     return;
@@ -2025,6 +2048,105 @@ function updateTitle() {
   else if (titleBox) closeTitle();
 }
 
+// ================= Flowchart positioning =================
+// The flowchart pages (/fate, /ubw, /hf) show one big chart made of day squares. When one of them opens
+// the page scrolls to the right place by itself:
+//   - the Prologue button: the very top (the Prologue square)
+//   - a route page: the last scene you opened in that route, or else that route's first big square
+// It runs once on arrival and stops as soon as you scroll, touch or press a key yourself.
+const FLOW_PAGES = { "/fate": "fate", "/ubw": "ubw", "/hf": "hf" };
+const FLOW_ROUTE_ATTR = { fate: "\u30bb", ubw: "\u51db", hf: "\u685c" }; // the squares' route="" values (Fate, UBW, HF)
+const FLOW_PROLOGUE_ATTR = "\u30d7";
+let lastScenes = {};
+let flowPath = null, flowTimer = null, flowStop = null;
+store.get("fsnLastScenes", {}, (v) => { lastScenes = v && typeof v === "object" ? v : {}; });
+
+// Remember the last scene opened in each route (scene pages look like /ubw/3rd-day/9).
+function recordLastScene(path) {
+  const seg = path.split("/").filter(Boolean);
+  if (seg.length < 3) return;
+  const r = seg[0].toLowerCase();
+  const route = r === "fate" ? "fate" : r === "ubw" ? "ubw" : r === "hf" ? "hf" : null;
+  if (!route || lastScenes[route] === path) return;
+  lastScenes[route] = path;
+  store.set("fsnLastScenes", lastScenes);
+}
+
+function stopFlowJump() {
+  if (flowTimer) { clearInterval(flowTimer); flowTimer = null; }
+  if (flowStop) { flowStop(); flowStop = null; }
+}
+
+function flowTarget(route, mode) {
+  if (mode === "top") {
+    return { el: document.querySelector('.section-day[route="' + FLOW_PROLOGUE_ATTR + '"]') || document.querySelector(".section-day"), block: "top" };
+  }
+  const last = lastScenes[route];
+  if (last) {
+    const box = [...document.querySelectorAll("a.graph-item")].find((x) => {
+      try { return normPath(new URL(x.getAttribute("href") || "", location.href).pathname) === last; } catch (err) { return false; }
+    });
+    if (box) return { el: box, block: "center" };
+  }
+  let sq = document.querySelector('.section-day[route="' + FLOW_ROUTE_ATTR[route] + '"]');
+  if (!sq) {
+    const a = document.querySelector('a.graph-item[href^="/' + route + '/"]');
+    sq = a && (a.closest(".section-day") || a);
+  }
+  return sq ? { el: sq, block: "start" } : null;
+}
+
+function applyFlowJump(route, mode) {
+  const t = flowTarget(route, mode);
+  if (!t) return false;
+  if (t.block === "top") {
+    if (t.el) t.el.scrollIntoView({ block: "start", inline: "center", behavior: "auto" });
+    window.scrollTo(window.scrollX, 0);
+    return true;
+  }
+  t.el.scrollIntoView({ block: t.block, inline: "center", behavior: "auto" });
+  if (t.block === "start") window.scrollBy(0, -16); // leave the square's title ("3rd Day") in view
+  return true;
+}
+
+function startFlowJump(route, firstLoad) {
+  stopFlowJump();
+  let mode = null;
+  store.get("fsnJump", null, (j) => {
+    if (j && j.type === "prologue" && Date.now() - (j.t || 0) < 30000) mode = "top";
+  });
+  store.set("fsnJump", null);
+  if (!mode && firstLoad) { // reload / back button: the browser puts you back where you were
+    let nav = "";
+    try { nav = (performance.getEntriesByType("navigation")[0] || {}).type || ""; } catch (err) { /* ignore */ }
+    if (nav === "back_forward" || nav === "reload") return;
+  }
+  const events = ["wheel", "touchstart", "mousedown", "keydown"];
+  const stop = () => stopFlowJump();
+  events.forEach((ev) => window.addEventListener(ev, stop, { capture: true, passive: true }));
+  flowStop = () => events.forEach((ev) => window.removeEventListener(ev, stop, true));
+  const t0 = Date.now();
+  let firstOk = 0, again = 0;
+  flowTimer = setInterval(() => {
+    if (!firstOk) { // the chart is built by the site after the page loads: wait for it
+      if (applyFlowJump(route, mode)) firstOk = Date.now();
+      else if (Date.now() - t0 > 10000) stopFlowJump();
+      return;
+    }
+    const dt = Date.now() - firstOk; // apply again a little later, in case the layout was still settling
+    if (dt > 500 && again === 0) { again = 1; applyFlowJump(route, mode); }
+    else if (dt > 1500) { applyFlowJump(route, mode); stopFlowJump(); }
+  }, 150);
+}
+
+function checkFlowPage() {
+  const p = currentPath();
+  if (p === flowPath) return;
+  const first = flowPath === null;
+  flowPath = p;
+  if (FLOW_PAGES[p]) startFlowJump(FLOW_PAGES[p], first); else stopFlowJump();
+}
+
 // ================= Route guide =================
 // Key = path + #hash of the page where a choice appears.
 const GUIDES = {
@@ -2107,6 +2229,7 @@ store.get("fsnGuideHidden", false, (v) => {
 
 function tick() {
   updateTitle();
+  checkFlowPage();
   updateHud(false);
   updateMenuBtn();
   applyTextFilter();
