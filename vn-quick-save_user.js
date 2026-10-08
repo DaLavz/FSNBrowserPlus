@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.29
-// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (New Game / Continue / Settings / Flowchart, can be turned off in Settings), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
+// @version      3.31
+// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (New Game / Continue / Settings / Flowchart, can be turned off in Settings), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu once you have completed a route, and at key moments), blue check on completed routes in the flowchart choice.
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -45,6 +45,15 @@ const VIDEOS = {
   fate: VIDEO_BASE + "fate.mp4",
   ubw: VIDEO_BASE + "ubw.mp4",
   hf: VIDEO_BASE + "heavens-feel.mp4"
+};
+// A route counts as COMPLETED when every scene listed here has its green checkmark (fully read).
+// Completed routes (1) get their opening played when you stay idle on the main menu and (2) get a blue check
+// in the main menu's flowchart choice. Paths look like the page address without the domain.
+// An empty list = that route can never count as completed.
+const ROUTE_DONE = {
+  fate: ["/prologue/1", "/prologue/2", "/prologue/3"],
+  ubw: ["/fate/1st-day/0", "/fate/15th-day/11", "/fate/15th-day/13", "/fate/15th-day/17"],
+  hf: ["/ubw/3rd-day/9", "/ubw/4th-day/3", "/ubw/14th-day/9", "/ubw/14th-day/12"]
 };
 // ----------------------------------------
 
@@ -866,8 +875,9 @@ function watchScene() {
 
 // ================= Intro video =================
 // On the main menu pages (/, /fate, /ubw, /hf), if the page stays unchanged for a while (25 s the
-// first time, 40 s once a video was watched), a big window plays the intro video of that route
-// (/ plays the Fate one). Not inside scenes. The countdown restarts after the window closes. No controls: just an X (or Esc) to close it.
+// first time, 40 s once a video was watched), a big window plays the opening of a route you have completed
+// (see ROUTE_DONE; nothing plays until a route is completed). Not inside scenes. The countdown restarts after
+// the window closes. No controls: just an X (or Esc) to close it.
 // ----- silence the VN's own music while a video plays -----
 // Mutes <audio>/<video> elements of the page (including ones the page created with
 // new Audio() and played after this script loaded) and Howler.js if the page uses it.
@@ -929,16 +939,22 @@ store.get("fsnVideosSeen", {}, (v) => {
   seenRoutes = v && typeof v === "object" ? v : {};
 });
 
-// The opening that plays when you stay idle on the main menu: the one of the arc whose day-4 scene you
-// reached most recently ("fate", "ubw" or "hf"). Nothing plays idly until you have reached one of them.
-let idleKind = null;
-store.get("fsnIdleKind", null, (v) => {
-  idleKind = v === "fate" || v === "ubw" || v === "hf" ? v : null;
-});
-function setIdleKind(kind) {
-  if (idleKind === kind) return;
-  idleKind = kind;
-  store.set("fsnIdleKind", kind);
+// The opening that plays when you stay idle on the main menu depends on which routes you have completed
+// (see ROUTE_DONE at the top). Nothing plays idly until one route is completed. With several completed routes
+// the openings take turns: each time one plays, the next completed route (Fate, then UBW, then HF) is next.
+const IDLE_ORDER = ["fate", "ubw", "hf"];
+let idleLast = null; // the route whose opening was shown last while idle
+store.get("fsnIdleLast", null, (v) => { idleLast = IDLE_ORDER.includes(v) ? v : null; });
+
+function pickIdleKind() {
+  const ready = IDLE_ORDER.filter((k) => routeComplete(k) && !failedRoutes[k]);
+  if (!ready.length) return null;
+  const start = IDLE_ORDER.indexOf(idleLast) + 1; // 0 when nothing has played yet
+  for (let i = 0; i < IDLE_ORDER.length; i++) {
+    const k = IDLE_ORDER[(start + i) % IDLE_ORDER.length];
+    if (ready.includes(k)) return k;
+  }
+  return null;
 }
 
 // Which route's video belongs to the current page: "fate", "ubw", "hf" or null.
@@ -1177,16 +1193,17 @@ function tickIdle() {
   if (sceneKey() !== null) { idleSince = Date.now(); return; } // no idle openings inside scenes, only on the main menu pages
   const seg = location.pathname.split("/").filter(Boolean);
   if (seg.length > 0 && (!IDLE_ON_FLOWCHARTS || !routeKind())) return; // "/" = the main menu; /fate, /ubw, /hf = flowcharts
-  const kind = idleKind; // the most recently reached arc, not the route of the page you are on
-  if (!kind || failedRoutes[kind]) return;
+  const kind = pickIdleKind(); // only routes you have completed; null = nothing to play yet
+  if (!kind) return;
   const wait = seenRoutes[kind] ? IDLE_REPEAT_MS : IDLE_FIRST_MS;
   if (Date.now() - idleSince < wait) return;
+  idleLast = kind;
+  store.set("fsnIdleLast", kind);
   openVideo(kind);
 }
 
 // ----- openings that play by themselves when you arrive at a certain page (like the real game) -----
 // They play every time you get there, no matter how often. The page's #hash is ignored.
-// Getting there also makes that arc's opening the one that plays when you stay idle on the main menu.
 const AUTO_VIDEOS = [
   { path: "/fate/4th-day/0", kind: "fate" },
   { path: "/ubw/4th-day/0", kind: "ubw" },
@@ -1206,7 +1223,6 @@ function checkArrival() {
   recordLastScene(path);
   const hit = AUTO_VIDEOS.find((a) => a.path === path);
   if (!hit) return;
-  setIdleKind(hit.kind); // reaching an arc's day 4 makes its opening the idle one, even if you skip it or load a save here
   if (failedRoutes[hit.kind]) return;
   // opened straight into the middle of that part (e.g. loading a save): don't replay the opening
   if (firstCheck && location.hash) return;
@@ -1348,6 +1364,12 @@ function isDojoLink(a) {
 function sceneStarted(path) {
   if (progressStore[path]) return true;
   return !!(curScene && curScene.path === path && curScene.visited.some(Boolean));
+}
+
+// True when every scene of the route's ROUTE_DONE list has its green checkmark.
+function routeComplete(kind) {
+  const list = ROUTE_DONE[kind];
+  return !!(doneLoaded && list && list.length && list.every((p) => doneScenes[normPath(p)]));
 }
 
 function restoreMark(a) {
@@ -1869,9 +1891,9 @@ let titleEnabled = true;  // Settings switch: false = no title screen at all (pl
 store.get("fsnTitleOn", true, (v) => { titleEnabled = v !== false; });
 const FLOW_ROUTES = [
   { label: "Prologue", path: "/fate", color: "#5f6672", glow: "#bfe6ff", jump: "prologue" }, // the Prologue square sits at the top of the Fate chart
-  { label: "Fate", path: "/fate", color: "#2f6fdb", glow: "#4aa8ff" },
-  { label: "Unlimited Blade Works", path: "/ubw", color: "#c0392b", glow: "#ff5a5a" },
-  { label: "Heaven's Feel", path: "/hf", color: "#8e3bd1", glow: "#c585ff" }
+  { label: "Fate", path: "/fate", color: "#2f6fdb", glow: "#4aa8ff", kind: "fate" },
+  { label: "Unlimited Blade Works", path: "/ubw", color: "#c0392b", glow: "#ff5a5a", kind: "ubw" },
+  { label: "Heaven's Feel", path: "/hf", color: "#8e3bd1", glow: "#c585ff", kind: "hf" }
 ];
 
 function isCompactScreen() {
@@ -1897,7 +1919,7 @@ function bigButton(label, bg, fn, extra) {
 }
 
 // Title screen menu entries: plain light text; when hovered or pressed they turn bright with a glowing line through them.
-function menuButton(label, fn, glow, small) {
+function menuButton(label, fn, glow, small, check) {
   const hot = glow || "#6fe9ff";
   const b = el("div", {
     boxSizing: "border-box", width: "100%", display: "flex", justifyContent: "center", alignItems: "center",
@@ -1918,6 +1940,15 @@ function menuButton(label, fn, glow, small) {
     boxShadow: "0 0 8px 1px " + hot + ", 0 0 22px 4px " + hot + "66", transition: "opacity .18s"
   });
   word.appendChild(streak);
+  if (check) { // a blue check right after the text (it hangs outside, so the text stays centred)
+    const tick = el("span", {
+      position: "absolute", left: "100%", top: "50%", transform: "translateY(-50%)", marginLeft: "10px",
+      color: "#4aa8ff", fontWeight: "bold", fontSize: "0.85em", lineHeight: "1",
+      textShadow: "0 0 8px rgba(74,168,255,0.85)", pointerEvents: "none"
+    }, "\u2713");
+    tick.title = "Route completed";
+    word.appendChild(tick);
+  }
   b.appendChild(word);
   const set = (on) => {
     word.style.color = on ? hot : "#cdd7ee";
@@ -2127,7 +2158,7 @@ function renderTitle() {
       wrap.appendChild(menuButton(r.label, () => {
         if (r.jump) store.set("fsnJump", { type: r.jump, t: Date.now() }); // tells the flowchart page to open at the top
         location.href = ORIGIN + r.path;
-      }, r.glow));
+      }, r.glow, false, !!r.kind && routeComplete(r.kind)));
     });
     titleBack(wrap);
     return;
