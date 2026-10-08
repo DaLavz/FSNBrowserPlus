@@ -3,12 +3,14 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.22
+// @version      3.23
 // @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (Continue / Settings / Flowchart), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
+// @grant        GM_xmlhttpRequest
+// @connect      dalavz.github.io
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -958,6 +960,50 @@ function closeVideo() {
   idleSince = Date.now(); // the countdown starts over after the window closes
 }
 
+// When an intro video can't be loaded, look at the file itself (first 512 KB) and say why.
+// Uses Tampermonkey's request function, so it is not blocked by the VN site's own rules.
+function diagnoseVideo(url, cb) {
+  const name = url.split("/").pop();
+  if (typeof GM_xmlhttpRequest !== "function") {
+    cb("couldn't check the file (GM_xmlhttpRequest isn't available).", "GM_xmlhttpRequest is not available, so the file could not be inspected.");
+    return;
+  }
+  const fail = (why) => cb(why, why + "\nAddress: " + url);
+  GM_xmlhttpRequest({
+    method: "GET", url, headers: { Range: "bytes=0-524287" }, responseType: "arraybuffer", timeout: 20000,
+    onerror: () => fail("couldn't reach the video host (network error, blocked by an extension, or a wrong address)."),
+    ontimeout: () => fail("the video host didn't answer in time."),
+    onload: (r) => {
+      const head = String(r.responseHeaders || "");
+      const type = (/content-type:\s*([^\r\n;]+)/i.exec(head) || [])[1] || "unknown";
+      const cr = /content-range:\s*bytes\s+\d+-\d+\/(\d+)/i.exec(head);
+      const len = /content-length:\s*(\d+)/i.exec(head);
+      const total = cr ? +cr[1] : (len && r.status === 200 ? +len[1] : 0);
+      const mb = total ? (total / 1048576).toFixed(1) + " MB" : "unknown size";
+      const info = "Address: " + url + "\nHTTP " + r.status + " | type " + type + " | " + mb;
+      if (r.status === 404) return cb("file not found (404): " + name + " isn't at that address. Check the name and that the site finished deploying.", info);
+      if (r.status >= 400) return cb("the video host answered HTTP " + r.status + ".", info);
+      const u8 = new Uint8Array(r.response || new ArrayBuffer(0));
+      let txt = "";
+      for (let i = 0; i < u8.length; i += 8192) txt += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+      if (/^version https:\/\/git-lfs/.test(txt)) return cb(name + " is a Git LFS pointer, not a video. GitHub Pages can't serve LFS files.", info);
+      if (/^\s*</.test(txt)) return cb("that address returns a web page, not a video.", info);
+      if (txt.substr(4, 4) !== "ftyp") return cb("the file doesn't look like an MP4 video (type " + type + ", " + mb + ").", info);
+      const has = (t) => txt.indexOf(t) !== -1;
+      const codecs = ["hvc1", "hev1", "avc1", "avc3", "av01", "vp09", "apch", "apcn", "apco", "apcs", "ap4h"].filter(has);
+      let short, detail = "Codecs found: " + (codecs.join(", ") || "none in the first 512 KB");
+      const i = txt.indexOf("avcC");
+      const profile = i !== -1 ? txt.charCodeAt(i + 5) : 0; // AVCProfileIndication
+      if (has("hvc1") || has("hev1")) short = "it's HEVC / H.265, which most browsers can't play. Re-encode it to H.264 (8-bit, yuv420p).";
+      else if (codecs.some((c) => /^ap/.test(c))) short = "it's ProRes, which browsers can't play. Re-encode it to H.264.";
+      else if ([110, 122, 244].includes(profile)) { short = "H.264 but high-bit-depth / 4:2:2-4:4:4 (profile " + profile + "), which browsers can't play. Re-encode to 8-bit yuv420p."; }
+      else if (has("avc1") || has("avc3")) short = "it looks like normal H.264 (profile " + (profile || "?") + "). Another cause: a damaged file, or the VN site blocking videos from other sites (see red messages in the console).";
+      else short = "can't tell the codec (the file's index is probably at the end). Re-encode it with '-movflags +faststart'.";
+      cb(short, info + "\n" + detail + (profile ? "\nH.264 profile: " + profile : "") + "\nResult: " + short);
+    }
+  });
+}
+
 function openVideo(kind) {
   const url = VIDEOS[kind];
   if (!url || videoBox) return;
@@ -1002,7 +1048,10 @@ function openVideo(kind) {
     const code = v.error ? v.error.code : 0; // 1 aborted, 2 network, 3 decode, 4 not found / blocked / unsupported
     console.warn("[VN script] intro video failed to load:", url, "| MediaError code", code, v.error && v.error.message);
     closeVideo();
-    toast("Intro video couldn't be loaded (error " + code + "). Details are in the browser console (F12).");
+    diagnoseVideo(url, (short, full) => {
+      console.warn("[VN script] video check:\n" + full);
+      toast("Intro video couldn't be loaded: " + short);
+    });
   });
 
   // the X button
