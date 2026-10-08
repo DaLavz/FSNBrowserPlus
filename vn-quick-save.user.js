@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.23
+// @version      3.25
 // @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (Continue / Settings / Flowchart), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -35,6 +35,9 @@ const IDLE_REPEAT_MS = 40000; // once a video was watched, this long before it s
 const IDLE_ON_FLOWCHARTS = true; // idle openings also play on the flowchart pages (/fate, /ubw, /hf); false = only on the main menu
 const CLOSE_WHEN_ENDED = true; // close the window by itself when the video finishes
 const VIDEO_BASE = "https://dalavz.github.io/FSNBrowserPlus/videos/";
+// The logo shown on the title screen. Upload a PNG (transparent background works best) to this address.
+// If it can't be loaded the plain text title "Fate/stay night" is shown instead. "" = always text.
+const TITLE_IMAGE = "https://dalavz.github.io/FSNBrowserPlus/images/title.png";
 const VIDEOS = {
   fate: VIDEO_BASE + "fate.mp4",
   ubw: VIDEO_BASE + "ubw.mp4",
@@ -1798,10 +1801,10 @@ let titleImport = null; // decoded save code waiting for confirmation
 let titleDraft = "";    // text typed or pasted in the import box
 let titleCompact = false; // short landscape screens (phones held sideways) get a tighter layout
 const FLOW_ROUTES = [
-  { label: "Prologue", path: "/fate", color: "#5f6672", jump: "prologue" }, // the Prologue square sits at the top of the Fate chart
-  { label: "Fate", path: "/fate", color: "#2f6fdb" },
-  { label: "Unlimited Blade Works", path: "/ubw", color: "#c0392b" },
-  { label: "Heaven's Feel", path: "/hf", color: "#8e3bd1" }
+  { label: "Prologue", path: "/fate", color: "#5f6672", glow: "#bfe6ff", jump: "prologue" }, // the Prologue square sits at the top of the Fate chart
+  { label: "Fate", path: "/fate", color: "#2f6fdb", glow: "#4aa8ff" },
+  { label: "Unlimited Blade Works", path: "/ubw", color: "#c0392b", glow: "#ff5a5a" },
+  { label: "Heaven's Feel", path: "/hf", color: "#8e3bd1", glow: "#c585ff" }
 ];
 
 function isCompactScreen() {
@@ -1820,6 +1823,44 @@ function bigButton(label, bg, fn, extra) {
   b.addEventListener("mouseenter", () => { b.style.filter = "brightness(1.3)"; });
   b.addEventListener("mouseleave", () => { b.style.filter = ""; });
   b.addEventListener("click", fn);
+  return b;
+}
+
+// Title screen menu entries: plain light text; when hovered or pressed they turn bright with a glowing line through them.
+function menuButton(label, fn, glow, small) {
+  const hot = glow || "#6fe9ff";
+  const b = el("div", {
+    boxSizing: "border-box", width: "100%", display: "flex", justifyContent: "center", alignItems: "center",
+    padding: titleCompact ? (small ? "6px 0" : "8px 0") : (small ? "10px 0" : "13px 0"),
+    cursor: "pointer", userSelect: "none", webkitUserSelect: "none", touchAction: "manipulation", flex: "0 0 auto",
+    webkitTapHighlightColor: "transparent"
+  });
+  const word = el("span", {
+    position: "relative", isolation: "isolate", display: "inline-block", padding: "0 6px", textAlign: "center",
+    color: "#cdd7ee", fontFamily: "'Segoe UI Light', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif", fontWeight: "300",
+    fontSize: small ? (titleCompact ? "16px" : "clamp(16px, 4.4vw, 20px)") : (titleCompact ? "20px" : "clamp(22px, 6vw, 30px)"),
+    letterSpacing: "1px", transition: "color .18s, text-shadow .18s"
+  }, label);
+  const streak = el("span", {
+    position: "absolute", left: "50%", top: "50%", zIndex: -1, pointerEvents: "none", opacity: "0",
+    width: "calc(100% + min(90px, 16vw))", height: "2px", transform: "translate(-50%, -50%)",
+    background: "linear-gradient(90deg, transparent 0%, " + hot + " 22%, #ffffff 50%, " + hot + " 78%, transparent 100%)",
+    boxShadow: "0 0 8px 1px " + hot + ", 0 0 22px 4px " + hot + "66", transition: "opacity .18s"
+  });
+  word.appendChild(streak);
+  b.appendChild(word);
+  const set = (on) => {
+    word.style.color = on ? hot : "#cdd7ee";
+    word.style.textShadow = on ? "0 0 10px " + hot + ", 0 0 24px " + hot + "99" : "none";
+    streak.style.opacity = on ? "1" : "0";
+  };
+  b.addEventListener("pointerenter", (e) => { if (e.pointerType === "mouse") set(true); });
+  b.addEventListener("pointerleave", () => set(false));
+  b.addEventListener("pointerdown", () => set(true));
+  b.addEventListener("pointerup", (e) => { if (e.pointerType !== "mouse") set(false); });
+  b.addEventListener("pointercancel", () => set(false));
+  // on a phone, let the glow show for a moment before the next screen replaces it
+  b.addEventListener("click", () => { set(true); setTimeout(fn, IS_TOUCH ? 140 : 0); });
   return b;
 }
 
@@ -1871,7 +1912,59 @@ function titleHeader(wrap, text, color) {
 }
 
 function titleBack(wrap, fn) {
-  wrap.appendChild(bigButton("\u2190 Back", "rgba(255,255,255,0.1)", fn || (() => setTitleView("home")), { flex: "0 0 auto" }));
+  wrap.appendChild(menuButton("\u2190 Back", fn || (() => setTitleView("home")), "#6fe9ff", true));
+}
+
+let titleImgSrc = TITLE_IMAGE;      // the address that works (the plain one, or a data: copy of it)
+let titleImgTriedData = false;
+let titleImgFailed = false;
+
+// Some pages refuse pictures from other sites. Tampermonkey can still download the file and hand it over as a data: address.
+function loadTitleImageAsData(cb) {
+  if (typeof GM_xmlhttpRequest !== "function") { cb(null); return; }
+  GM_xmlhttpRequest({
+    method: "GET", url: TITLE_IMAGE, responseType: "arraybuffer", timeout: 20000,
+    onerror: () => cb(null), ontimeout: () => cb(null),
+    onload: (r) => {
+      if (r.status !== 200 || !r.response) { cb(null); return; }
+      const u8 = new Uint8Array(r.response);
+      let bin = "";
+      for (let i = 0; i < u8.length; i += 8192) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+      cb("data:image/png;base64," + btoa(bin));
+    }
+  });
+}
+
+// The title picture, or null (then the text title is used).
+function titleLogo() {
+  if (!TITLE_IMAGE || titleImgFailed) return null;
+  const box = el("div", {
+    display: "flex", justifyContent: "center", alignItems: "center", margin: titleCompact ? "0" : "0 0 18px"
+  });
+  const img = document.createElement("img");
+  img.alt = "Fate/stay night";
+  img.draggable = false;
+  Object.assign(img.style, {
+    display: "block", width: "auto", height: "auto", objectFit: "contain", pointerEvents: "none", userSelect: "none",
+    maxWidth: titleCompact ? "min(380px, 42vw)" : "min(560px, 88vw)",
+    maxHeight: titleCompact ? "72vh" : "34vh",
+    filter: "drop-shadow(0 0 16px rgba(90,150,255,0.5))"
+  });
+  const useText = () => {
+    titleImgFailed = true;
+    if (titleBox && titleView === "home") renderTitle();
+  };
+  img.addEventListener("error", () => {
+    if (!titleImgTriedData) {
+      titleImgTriedData = true;
+      loadTitleImageAsData((d) => { if (d) { titleImgSrc = d; img.src = d; } else useText(); });
+    } else {
+      useText();
+    }
+  });
+  img.src = titleImgSrc;
+  box.appendChild(img);
+  return box;
 }
 
 function renderTitle() {
@@ -1885,25 +1978,27 @@ function renderTitle() {
   titleBox.appendChild(wrap);
 
   if (titleView === "home") {
-    const title = el("div", {
+    const textTitle = el("div", {
       textAlign: "center", fontFamily: "Georgia, 'Times New Roman', serif", fontWeight: "bold",
       fontSize: titleCompact ? "clamp(28px, 6vw, 46px)" : "clamp(34px, 10vw, 64px)", lineHeight: "1.1", letterSpacing: "2px",
       textShadow: "0 0 22px rgba(90,150,255,0.65)", margin: titleCompact ? "0" : "0 0 18px"
     }, "Fate/stay night");
+    const title = titleLogo() || textTitle;
     const btns = [
-      bigButton("Continue", "rgba(30,111,255,0.55)", () => setTitleView("load")),
-      bigButton("Settings", "rgba(95,102,114,0.55)", () => setTitleView("settings")),
-      bigButton("Flowchart", "rgba(176,0,0,0.5)", () => setTitleView("flow"))
+      menuButton("Continue", () => setTitleView("load")),
+      menuButton("Settings", () => setTitleView("settings")),
+      menuButton("Flowchart", () => setTitleView("flow"))
     ];
     if (titleCompact) {
       // phone held sideways: title on the left, buttons on the right, everything fits the short screen
       wrap.style.flexDirection = "row"; wrap.style.alignItems = "center"; wrap.style.gap = "28px"; wrap.style.maxWidth = "760px";
       title.style.flex = "1 1 0";
-      const col = el("div", { display: "flex", flexDirection: "column", gap: "8px", flex: "0 0 min(300px, 44vw)" });
+      const col = el("div", { display: "flex", flexDirection: "column", gap: "0", flex: "0 0 min(300px, 44vw)" });
       btns.forEach((b) => col.appendChild(b));
       wrap.appendChild(title);
       wrap.appendChild(col);
     } else {
+      wrap.style.gap = "4px";
       wrap.appendChild(title);
       btns.forEach((b) => wrap.appendChild(b));
     }
@@ -1911,12 +2006,13 @@ function renderTitle() {
   }
 
   if (titleView === "flow") {
+    wrap.style.gap = titleCompact ? "0" : "2px";
     titleHeader(wrap, "Choose a route");
     FLOW_ROUTES.forEach((r) => {
-      wrap.appendChild(bigButton(r.label, r.color, () => {
+      wrap.appendChild(menuButton(r.label, () => {
         if (r.jump) store.set("fsnJump", { type: r.jump, t: Date.now() }); // tells the flowchart page to open at the top
         location.href = ORIGIN + r.path;
-      }));
+      }, r.glow));
     });
     titleBack(wrap);
     return;
