@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.27
-// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (Continue / Settings / Flowchart), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
+// @version      3.29
+// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (New Game / Continue / Settings / Flowchart, can be turned off in Settings), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, and at key moments).
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -27,7 +27,7 @@ const LOAD_KEY = "l";
 const GUIDE_KEY = "h"; // hides/shows the route guide
 const SETTINGS_KEY = "g"; // opens the Settings tab
 const SLOTS = 6;
-const TITLE_SCREEN = true; // false = no title screen on the main page
+const TITLE_SCREEN = true; // false = no title screen on the main page (it can also be turned off and on in Settings)
 
 // Intro video (pops up when the page stays unchanged for a while)
 const IDLE_FIRST_MS = 25000;  // page unchanged for this long -> a video's first showing
@@ -63,6 +63,7 @@ let mode = null;          // "save" | "load" | null
 let pending = null;       // slot index waiting for overwrite confirmation
 let pendingImport = null; // decoded save code waiting for import confirmation
 let pendingReset = false; // asking whether to clear all checkmarks
+let pendingDojos = false; // asking whether to really show the (spoiler) tiger dojos
 let view = null;          // null | "export" | "import" (the save-code screens)
 let importDraft = "";     // text typed or pasted in the import box
 
@@ -96,11 +97,34 @@ function swallowEvents(node) {
     .forEach((type) => node.addEventListener(type, (ev) => ev.stopPropagation()));
 }
 
+// Hover / press feedback that works on any background (even see-through ones): a light veil on hover,
+// a dark veil and a slight shrink while pressed. Mouse hover only counts for real mice, so it never sticks on phones.
+function addFeedback(node) {
+  const baseShadow = node.style.boxShadow || "";
+  const baseBorder = node.style.borderColor || "";
+  const hasBorder = !!node.style.border;
+  let hover = false, down = false;
+  node.style.transition = "box-shadow .12s, transform .08s, border-color .12s";
+  const apply = () => {
+    const veil = down ? "inset 0 0 0 100px rgba(0,0,0,0.28)"
+      : hover ? "inset 0 0 0 100px rgba(255,255,255,0.18)" : "";
+    node.style.boxShadow = [veil, baseShadow].filter(Boolean).join(", ");
+    node.style.transform = down ? "scale(0.97)" : "";
+    if (hasBorder) node.style.borderColor = (hover || down) ? "rgba(255,255,255,0.65)" : baseBorder;
+  };
+  node.addEventListener("pointerenter", (e) => { if (e.pointerType === "mouse") { hover = true; apply(); } });
+  node.addEventListener("pointerleave", () => { hover = false; down = false; apply(); });
+  node.addEventListener("pointerdown", () => { down = true; apply(); });
+  node.addEventListener("pointerup", () => { down = false; apply(); });
+  node.addEventListener("pointercancel", () => { down = false; hover = false; apply(); });
+}
+
 function button(label, bg, fn, extra) {
   const b = el("div", Object.assign({
     textAlign: "center", padding: "7px 10px", borderRadius: "4px",
     cursor: "pointer", background: bg, fontWeight: "bold"
   }, extra || {}), label);
+  addFeedback(b);
   b.addEventListener("click", fn);
   return b;
 }
@@ -172,6 +196,7 @@ function closeMenu() {
   pending = null;
   pendingImport = null;
   pendingReset = false;
+  pendingDojos = false;
   view = null;
   importDraft = "";
 }
@@ -190,6 +215,7 @@ function openMenu(newMode) {
   pending = null;
   pendingImport = null;
   pendingReset = false;
+  pendingDojos = false;
   view = null;
   refresh();
 }
@@ -253,6 +279,20 @@ function renderMenu(slots, auto, message) {
     menu.appendChild(el("div", { color: "#ffb35a", fontSize: "12px", marginBottom: "8px" }, "This can't be undone."));
     const btns = el("div", { display: "flex", gap: "8px" });
     btns.appendChild(button("Yes, reset (Y)", "#b00000", confirmYes, { flex: "1" }));
+    btns.appendChild(button("No (N)", "#444", cancelConfirm, { flex: "1" }));
+    menu.appendChild(btns);
+    document.body.appendChild(menu);
+    return;
+  }
+
+  // ----- show tiger dojos (spoiler) confirmation -----
+  if (pendingDojos) {
+    menu.appendChild(el("div", { fontWeight: "bold", marginBottom: "8px", color: "#ffb35a" }, "\u26a0 Spoiler warning"));
+    menu.appendChild(el("div", { marginBottom: "6px" },
+      "Tiger dojos stay hidden on the flowcharts until you find them yourself, because where they are gives away what is coming."));
+    menu.appendChild(el("div", { color: "#ffb35a", fontSize: "12px", marginBottom: "8px" }, "Show them anyway?"));
+    const btns = el("div", { display: "flex", gap: "8px" });
+    btns.appendChild(button("Yes, show (Y)", "#b00000", confirmYes, { flex: "1" }));
     btns.appendChild(button("No (N)", "#444", cancelConfirm, { flex: "1" }));
     menu.appendChild(btns);
     document.body.appendChild(menu);
@@ -332,7 +372,7 @@ function renderMenu(slots, auto, message) {
     if (disabled) tab.title = "Saving is disabled on the main menu";
     tab.addEventListener("click", () => {
       if (disabled || m === mode) return;
-      mode = m; pending = null; pendingImport = null; pendingReset = false; view = null;
+      mode = m; pending = null; pendingImport = null; pendingReset = false; pendingDojos = false; view = null;
       refresh();
     });
     bar.appendChild(tab);
@@ -412,12 +452,26 @@ function renderSettingsPage(message) {
   g.appendChild(button(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); refresh(); }, chip));
   g.appendChild(button(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); refresh(); }, chip));
   g.appendChild(button(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); refresh(); }, chip));
-  g.appendChild(button(showDojos ? "Hide tiger dojos" : "Show tiger dojos", chipBg, () => { toggleDojos(); refresh(); }, chip));
+  g.appendChild(button(showDojos ? "Hide tiger dojos" : "\u26a0 Show tiger dojos (spoilers)", chipBg, () => {
+    if (showDojos) { toggleDojos(); refresh(); } else { pendingDojos = true; refresh(); }
+  }, showDojos ? chip : Object.assign({}, chip, { flex: "1 1 100%", color: "#ffd08a" })));
 
   section("Saves");
   g = group();
   g.appendChild(button("Export saves", chipBg, () => { view = "export"; refresh(); }, chip));
   g.appendChild(button("Import saves", chipBg, () => { view = "import"; importDraft = ""; refresh(); }, chip));
+
+  if (TITLE_SCREEN) {
+    section("Main menu");
+    g = group();
+    g.appendChild(button(titleEnabled ? "Turn off main menu" : "Turn on main menu", chipBg, () => {
+      titleEnabled = !titleEnabled;
+      store.set("fsnTitleOn", titleEnabled);
+      if (!titleEnabled && titleBox) closeTitle();
+      if (titleEnabled && currentPath() === "/") { updateTitle(); return; } // the title screen opens right away
+      refresh(titleEnabled ? "Main menu turned on. It shows on the main page." : "Main menu turned off.");
+    }, Object.assign({}, chip, { flex: "1 1 100%" })));
+  }
 
   section("Progress");
   g = group();
@@ -483,6 +537,12 @@ function chooseAuto() {
 }
 
 function confirmYes() {
+  if (pendingDojos) {
+    pendingDojos = false;
+    toggleDojos();
+    refresh("Tiger dojos are now shown.");
+    return;
+  }
   if (pendingReset) {
     resetProgress();
     closeMenu();
@@ -499,6 +559,7 @@ function cancelConfirm() {
   pending = null;
   pendingImport = null;
   pendingReset = false;
+  pendingDojos = false;
   refresh();
 }
 
@@ -718,12 +779,12 @@ document.addEventListener("keydown", (e) => {
   // (while an intro video is open, blockKeysWhileVideo() below handles the keys first)
 
   if (menu) {
-    if (view && pending === null && !pendingImport && !pendingReset) {
+    if (view && pending === null && !pendingImport && !pendingReset && !pendingDojos) {
       // on the save-code screens, typing goes to the text box; Esc goes back
       if (key === "escape") { swallow(); view = null; refresh(); }
       return;
     }
-    if (pending !== null || pendingImport || pendingReset) {
+    if (pending !== null || pendingImport || pendingReset || pendingDojos) {
       if (key === "y" || key === "enter") { swallow(); confirmYes(); }
       else if (key === "n" || key === "escape") { swallow(); cancelConfirm(); }
       else if (/^[0-9]$/.test(key) || key === SAVE_KEY || key === LOAD_KEY || key === SETTINGS_KEY) swallow();
@@ -1803,6 +1864,9 @@ let titleMsg = "";
 let titleImport = null; // decoded save code waiting for confirmation
 let titleDraft = "";    // text typed or pasted in the import box
 let titleCompact = false; // short landscape screens (phones held sideways) get a tighter layout
+let titleWide = false;    // big computer screens: the title picture is shown larger
+let titleEnabled = true;  // Settings switch: false = no title screen at all (plain flowchart page)
+store.get("fsnTitleOn", true, (v) => { titleEnabled = v !== false; });
 const FLOW_ROUTES = [
   { label: "Prologue", path: "/fate", color: "#5f6672", glow: "#bfe6ff", jump: "prologue" }, // the Prologue square sits at the top of the Fate chart
   { label: "Fate", path: "/fate", color: "#2f6fdb", glow: "#4aa8ff" },
@@ -1814,6 +1878,10 @@ function isCompactScreen() {
   return window.innerWidth > window.innerHeight && window.innerHeight < 520;
 }
 
+function isWideScreen() {
+  return window.innerWidth >= 900 && !isCompactScreen();
+}
+
 function bigButton(label, bg, fn, extra) {
   const b = el("div", Object.assign({
     boxSizing: "border-box", width: "100%", textAlign: "center", cursor: "pointer",
@@ -1823,8 +1891,7 @@ function bigButton(label, bg, fn, extra) {
     border: "1px solid rgba(255,255,255,0.28)", boxShadow: "0 2px 10px rgba(0,0,0,0.45)",
     userSelect: "none", webkitUserSelect: "none", touchAction: "manipulation"
   }, extra || {}), label);
-  b.addEventListener("mouseenter", () => { b.style.filter = "brightness(1.3)"; });
-  b.addEventListener("mouseleave", () => { b.style.filter = ""; });
+  addFeedback(b);
   b.addEventListener("click", fn);
   return b;
 }
@@ -1981,12 +2048,17 @@ function titleLogo() {
   const img = document.createElement("img");
   img.alt = "Fate/stay night";
   img.draggable = false;
+  // Big computer screens: the picture fills up to 860 px of width (and up to ~46% of the height, always leaving
+  // room for the four buttons). Phones and tablets keep a smaller picture that never gets wider than the screen.
+  const big = titleWide && !titleCompact;
   Object.assign(img.style, {
-    display: "block", width: "auto", height: "auto", objectFit: "contain", pointerEvents: "none", userSelect: "none",
-    maxWidth: titleCompact ? "min(380px, 42vw)" : "min(560px, 88vw)",
-    maxHeight: titleCompact ? "72vh" : "34vh",
+    display: "block", width: big ? "100%" : "auto", height: "auto", objectFit: "contain", pointerEvents: "none", userSelect: "none",
+    maxWidth: titleCompact ? "min(380px, 42vw)" : big ? "min(860px, 100%)" : "min(560px, 100%)",
+    maxHeight: titleCompact ? "72vh" : big ? "max(120px, min(46vh, calc(100vh - 380px)))" : "30vh",
     filter: "drop-shadow(0 0 16px rgba(90,150,255,0.5))"
   });
+  // phones: the visible height changes with the browser bar, so use it when the browser knows it (ignored otherwise)
+  if (!titleCompact) img.style.maxHeight = big ? "max(120px, min(46dvh, calc(100dvh - 380px)))" : "30dvh";
   const useText = () => {
     titleImgFailed = true;
     if (titleBox && titleView === "home") renderTitle();
@@ -2006,6 +2078,7 @@ function titleLogo() {
 
 function renderTitle() {
   if (!titleBox) return;
+  titleWide = isWideScreen();
   titleBox.textContent = "";
   const wrap = el("div", {
     display: "flex", flexDirection: "column", alignItems: "stretch", gap: titleCompact ? "8px" : "14px",
@@ -2022,6 +2095,7 @@ function renderTitle() {
     }, "Fate/stay night");
     const title = titleLogo() || textTitle;
     const btns = [
+      menuButton("New Game", () => { location.href = ORIGIN + "/prologue/1"; }),
       menuButton("Continue", () => setTitleView("load")),
       menuButton("Settings", () => setTitleView("settings")),
       menuButton("Flowchart", () => setTitleView("flow"))
@@ -2035,9 +2109,13 @@ function renderTitle() {
       wrap.appendChild(title);
       wrap.appendChild(col);
     } else {
+      // the picture can use the full width; the buttons stay in a narrower column in the middle
       wrap.style.gap = "4px";
+      wrap.style.maxWidth = "min(900px, 100%)";
       wrap.appendChild(title);
-      btns.forEach((b) => wrap.appendChild(b));
+      const col = el("div", { display: "flex", flexDirection: "column", width: "100%", maxWidth: "440px", alignSelf: "center", flex: "0 0 auto" });
+      btns.forEach((b) => col.appendChild(b));
+      wrap.appendChild(col);
     }
     return;
   }
@@ -2187,17 +2265,48 @@ function renderTitle() {
     return;
   }
 
+  if (titleSub === "dojos") {
+    section("\u26a0 Spoiler warning");
+    note("Tiger dojos stay hidden on the flowcharts until you find them yourself, because where they are gives away what is coming.", "#fff");
+    note("Show them anyway?");
+    yesNo("Yes, show them", () => {
+      toggleDojos();
+      titleSub = null; titleMsg = "Tiger dojos are now shown.";
+      renderTitle();
+    }, subBack);
+    return;
+  }
+
+  if (titleSub === "menuOff") {
+    section("Turn off the main menu?");
+    note("This title screen will no longer appear. You will see the plain flowchart page instead.", "#fff");
+    note("You can turn it back on any time in the small Settings menu (" +
+      (IS_TOUCH ? "tap the \u2630 button, then Settings" : "press " + SETTINGS_KEY.toUpperCase() + " or click the Settings box in the top right") + ").");
+    yesNo("Yes, turn off", () => {
+      titleEnabled = false;
+      store.set("fsnTitleOn", false);
+      titleSub = null; titleMsg = "";
+      closeTitle();
+      toast("Main menu turned off. " + (IS_TOUCH ? "Tap \u2630, then Settings, to turn it on again." : "Press " + SETTINGS_KEY.toUpperCase() + " to open Settings and turn it on again."));
+    }, subBack);
+    return;
+  }
+
   section("Display and text");
   let g = grid();
   g.appendChild(bigButton(guideHidden ? "Show guide" : "Hide guide", chipBg, () => { toggleGuide(true); renderTitle(); }, chip));
   g.appendChild(bigButton(hudHidden ? "Show position" : "Hide position", chipBg, () => { toggleHud(); renderTitle(); }, chip));
   g.appendChild(bigButton(grayHidden ? "Show gray text" : "Hide gray text", chipBg, () => { toggleGray(); renderTitle(); }, chip));
   g.appendChild(bigButton(revealOn ? "Turn off reveal" : "Turn on reveal", chipBg, () => { toggleReveal(); renderTitle(); }, chip));
-  g.appendChild(bigButton(showDojos ? "Hide tiger dojos" : "Show tiger dojos", chipBg, () => { toggleDojos(); renderTitle(); }, chip));
+  g.appendChild(bigButton(showDojos ? "Hide tiger dojos" : "\u26a0 Show tiger dojos (spoilers)", chipBg, () => {
+    if (showDojos) { toggleDojos(); renderTitle(); } else { titleSub = "dojos"; titleMsg = ""; renderTitle(); }
+  }, showDojos ? chip : Object.assign({}, chip, { color: "#ffd08a" })));
   section("Saves");
   g = grid();
   g.appendChild(bigButton("Export saves", chipBg, () => { titleSub = "export"; titleMsg = ""; renderTitle(); }, chip));
   g.appendChild(bigButton("Import saves", chipBg, () => { titleSub = "import"; titleMsg = ""; titleDraft = ""; renderTitle(); }, chip));
+  section("Main menu");
+  panel.appendChild(bigButton("Turn off main menu", chipBg, () => { titleSub = "menuOff"; titleMsg = ""; renderTitle(); }, chip));
   section("Progress");
   panel.appendChild(bigButton("Reset checkmarks", "#8a1010", () => { titleSub = "reset"; titleMsg = ""; renderTitle(); }, chip));
   if (titleMsg) note(titleMsg);
@@ -2219,6 +2328,7 @@ function relayoutTitle() {
   if (!titleBox) return;
   const c = isCompactScreen();
   if (c !== titleCompact) { titleCompact = c; renderTitle(); }
+  else if (isWideScreen() !== titleWide && titleView === "home") renderTitle(); // crossing the big-screen size: resize the picture
 }
 window.addEventListener("resize", relayoutTitle);
 window.addEventListener("orientationchange", () => setTimeout(relayoutTitle, 150));
@@ -2226,6 +2336,7 @@ window.addEventListener("orientationchange", () => setTimeout(relayoutTitle, 150
 // Shown while you are on the plain main page ("/"); removed when you go anywhere else.
 function updateTitle() {
   if (!TITLE_SCREEN) return;
+  if (!titleEnabled) { if (titleBox) closeTitle(); return; } // turned off in Settings
   if (currentPath() === "/") openTitle();
   else if (titleBox) closeTitle();
 }
