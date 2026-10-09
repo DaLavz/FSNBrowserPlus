@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.33
+// @version      3.34
 // @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (New Game / Continue / Settings / Flowchart, can be turned off in Settings), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, unlocked by completing routes, and at key moments), blue check on completed routes in the flowchart choice.
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -1192,7 +1192,7 @@ function tickIdle() {
   }
   if (videoBox) { duckPageAudio(); return; } // also silences music that starts during the video
   if (titleBox) duckPageAudio();            // the title screen keeps the VN silent; the idle opening still plays over it
-  if (menu || document.visibilityState !== "visible") { idleSince = Date.now(); return; }
+  if (menu || titleYield || document.visibilityState !== "visible") { idleSince = Date.now(); return; }
   if (sceneKey() !== null) { idleSince = Date.now(); return; } // no idle openings inside scenes, only on the main menu pages
   const seg = location.pathname.split("/").filter(Boolean);
   if (seg.length > 0 && (!IDLE_ON_FLOWCHARTS || !routeKind())) return; // "/" = the main menu; /fate, /ubw, /hf = flowcharts
@@ -1885,8 +1885,9 @@ function updateMenuBtn() {
 
 // ================= Main menu (title screen) =================
 // A full-screen title screen over the plain main page (https://fatestaynight.vnovel.org/). It covers
-// the whole page, silences the VN's music, blocks scrolling and ignores Esc and all shortcut keys.
-// Buttons: Continue (big load screen), Settings (big settings screen) and Flowchart (Fate / UBW / HF).
+// the whole page, silences the VN's music, blocks scrolling and ignores the shortcut keys. Esc is the exception:
+// it goes through to the website, whose own settings then show on top (the title screen steps aside while they are open).
+// Buttons: New Game, Continue (big load screen), Flowchart (Fate / UBW / HF) and Settings (big settings screen).
 // It goes away by itself as soon as you leave the main page (Continue, a flowchart, or any link).
 let titleBox = null;
 let titleView = "home"; // "home" | "load" | "settings" | "flow"
@@ -2003,6 +2004,7 @@ function openTitle() {
 
 function closeTitle() {
   if (!titleBox) return;
+  if (titleYield) { clearInterval(titleYield.timer); titleYield = null; }
   titleBox.remove();
   titleBox = null;
   titleImport = null;
@@ -2094,11 +2096,11 @@ function titleLogo() {
   Object.assign(img.style, {
     display: "block", width: big ? "100%" : "auto", height: "auto", objectFit: "contain", pointerEvents: "none", userSelect: "none",
     maxWidth: titleCompact ? "min(380px, 42vw)" : big ? "min(860px, 100%)" : "min(560px, 100%)",
-    maxHeight: titleCompact ? "72vh" : big ? "max(120px, min(46vh, calc(100vh - 380px)))" : "30vh",
+    maxHeight: titleCompact ? "72vh" : big ? "max(120px, min(46vh, calc(100vh - 410px)))" : "30vh",
     filter: "drop-shadow(0 0 16px rgba(90,150,255,0.5))"
   });
   // phones: the visible height changes with the browser bar, so use it when the browser knows it (ignored otherwise)
-  if (!titleCompact) img.style.maxHeight = big ? "max(120px, min(46dvh, calc(100dvh - 380px)))" : "30dvh";
+  if (!titleCompact) img.style.maxHeight = big ? "max(120px, min(46dvh, calc(100dvh - 410px)))" : "30dvh";
   const useText = () => {
     titleImgFailed = true;
     if (titleBox && titleView === "home") renderTitle();
@@ -2137,15 +2139,22 @@ function renderTitle() {
     const btns = [
       menuButton("New Game", () => { location.href = ORIGIN + "/prologue/1"; }),
       menuButton("Continue", () => setTitleView("load")),
-      menuButton("Settings", () => setTitleView("settings")),
-      menuButton("Flowchart", () => setTitleView("flow"))
+      menuButton("Flowchart", () => setTitleView("flow")),
+      menuButton("Settings", () => setTitleView("settings"))
     ];
+    // small hint under the last button (computers only: phones have no Esc key)
+    const escHint = IS_TOUCH ? null : el("div", {
+      textAlign: "center", color: "rgba(255,255,255,0.6)", fontWeight: "300", letterSpacing: "0.5px",
+      fontFamily: "'Segoe UI Light', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+      fontSize: titleCompact ? "11px" : "13px", marginTop: titleCompact ? "0" : "2px", pointerEvents: "none", userSelect: "none"
+    }, "press Esc for website settings");
     if (titleCompact) {
       // phone held sideways: title on the left, buttons on the right, everything fits the short screen
       wrap.style.flexDirection = "row"; wrap.style.alignItems = "center"; wrap.style.gap = "28px"; wrap.style.maxWidth = "760px";
       title.style.flex = "1 1 0";
       const col = el("div", { display: "flex", flexDirection: "column", gap: "0", flex: "0 0 min(300px, 44vw)" });
       btns.forEach((b) => col.appendChild(b));
+      if (escHint) col.appendChild(escHint);
       wrap.appendChild(title);
       wrap.appendChild(col);
     } else {
@@ -2155,6 +2164,7 @@ function renderTitle() {
       wrap.appendChild(title);
       const col = el("div", { display: "flex", flexDirection: "column", width: "100%", maxWidth: "440px", alignSelf: "center", flex: "0 0 auto" });
       btns.forEach((b) => col.appendChild(b));
+      if (escHint) col.appendChild(escHint);
       wrap.appendChild(col);
     }
     return;
@@ -2356,12 +2366,59 @@ function renderTitle() {
   titleBack(wrap);
 }
 
-// Esc, shortcut keys, arrows, space... never reach the game or our small menus while the title screen is open.
+// Shortcut keys, arrows, space... never reach the game or our small menus while the title screen is open.
 // (Typing inside the save-code box still works, and Ctrl/Alt/Cmd shortcuts and F-keys are left alone.)
+// Esc is let through to the website: its own settings open, and the title screen steps aside for them.
+let titleYield = null; // while the website's own menu may be open over the title screen
+
+// The topmost things at a grid of points on the screen that are not ours: they tell us if the website
+// has put something (its settings window) over the title screen.
+function siteOnTop() {
+  const found = new Set();
+  const w = window.innerWidth, h = window.innerHeight;
+  for (let i = 1; i <= 6; i++) {
+    for (let j = 1; j <= 6; j++) {
+      const node = document.elementFromPoint(w * i / 7, h * j / 7);
+      if (node && !node.closest("[data-vnqs]")) found.add(node);
+    }
+  }
+  return found;
+}
+
+function startTitleYield() {
+  if (titleYield || !titleBox) return;
+  titleBox.style.zIndex = "0"; // below the website's own pop-ups, but still above the plain page
+  titleYield = { since: Date.now(), baseline: siteOnTop(), timer: setInterval(checkTitleYield, 250) };
+}
+
+function stopTitleYield() {
+  if (!titleYield) return;
+  clearInterval(titleYield.timer);
+  titleYield = null;
+  if (titleBox) titleBox.style.zIndex = "2147483647"; // the title screen covers everything again
+  idleSince = Date.now();
+}
+
+function checkTitleYield() {
+  if (!titleYield) return;
+  if (!titleBox) { stopTitleYield(); return; }
+  const opened = [...siteOnTop()].some((n) => !titleYield.baseline.has(n));
+  if (!opened && Date.now() - titleYield.since > 700) stopTitleYield(); // nothing of the website on top (any more)
+}
+
 function blockKeysWhileTitle(e) {
   if (!titleBox || videoBox) return;
   if (e.ctrlKey || e.metaKey || e.altKey || /^F\d+$/.test(e.key)) return;
-  if (isTyping(e) && titleBox.contains(e.target)) return;
+  if (isTyping(e) && (titleBox.contains(e.target) || titleYield)) return;
+  if (e.key === "Escape") {
+    if (e.type === "keydown") {
+      if (titleYield) titleYield.since = Date.now(); // give the website a moment to react
+      else startTitleYield();
+    }
+    return; // Esc goes through to the website
+  }
+  // while the website's menu is open, the keys it uses to move around work too
+  if (titleYield && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", " ", "Tab"].includes(e.key)) return;
   e.preventDefault();
   e.stopImmediatePropagation();
 }
