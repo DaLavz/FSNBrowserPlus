@@ -3,7 +3,7 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.31
+// @version      3.32
 // @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (New Game / Continue / Settings / Flowchart, can be turned off in Settings), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu once you have completed a route, and at key moments), blue check on completed routes in the flowchart choice.
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
@@ -1372,6 +1372,12 @@ function routeComplete(kind) {
   return !!(doneLoaded && list && list.length && list.every((p) => doneScenes[normPath(p)]));
 }
 
+// For troubleshooting: the scenes of a route that do not have their green checkmark yet.
+function routeMissing(kind) {
+  const list = ROUTE_DONE[kind] || [];
+  return list.filter((p) => !doneScenes[normPath(p)]);
+}
+
 function restoreMark(a) {
   const o = markOrig.get(a) || {};
   [["background-color", o.bg], ["box-shadow", o.shadow], ["position", o.pos], ["display", o.display], ["visibility", o.vis], ["pointer-events", o.pe]].forEach(([prop, val]) => {
@@ -1943,8 +1949,8 @@ function menuButton(label, fn, glow, small, check) {
   if (check) { // a blue check right after the text (it hangs outside, so the text stays centred)
     const tick = el("span", {
       position: "absolute", left: "100%", top: "50%", transform: "translateY(-50%)", marginLeft: "10px",
-      color: "#4aa8ff", fontWeight: "bold", fontSize: "0.85em", lineHeight: "1",
-      textShadow: "0 0 8px rgba(74,168,255,0.85)", pointerEvents: "none"
+      color: "#7fd0ff", fontWeight: "bold", fontSize: "0.95em", lineHeight: "1", zIndex: 2,
+      textShadow: "0 0 3px #04163a, 0 0 3px #04163a, 0 0 10px rgba(110,200,255,0.95)", pointerEvents: "none"
     }, "\u2713");
     tick.title = "Route completed";
     word.appendChild(tick);
@@ -2160,6 +2166,9 @@ function renderTitle() {
         location.href = ORIGIN + r.path;
       }, r.glow, false, !!r.kind && routeComplete(r.kind)));
     });
+    try { // troubleshooting aid: press F12 and look at the Console to see what a route is still waiting for
+      FLOW_ROUTES.forEach((r) => { if (r.kind) console.log("[vn-quick-save] " + r.label + ": " + (routeComplete(r.kind) ? "completed" : "missing " + (routeMissing(r.kind).join(", ") || "(no scenes listed)"))); });
+    } catch (err) { /* ignore */ }
     titleBack(wrap);
     return;
   }
