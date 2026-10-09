@@ -3,8 +3,8 @@
 // @downloadURL  https://raw.githubusercontent.com/DaLavz/FSNBrowserPlus/main/vn-quick-save.user.js
 // @name         VN Quick Save + Route Guide (fatestaynight.vnovel.org)
 // @namespace    https://github.com/YOUR-USERNAME/vn-quick-save
-// @version      3.32
-// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (New Game / Continue / Settings / Flowchart, can be turned off in Settings), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu once you have completed a route, and at key moments), blue check on completed routes in the flowchart choice.
+// @version      3.33
+// @description  S = save menu, L = load menu (6 slots + auto-save), G = settings. Title screen on the main page (New Game / Continue / Settings / Flowchart, can be turned off in Settings), position display with a Main menu button, checkmarks on read scenes, tiger dojos hidden on the main menu until you reach them (red = started, green = read), hides the grayed-out text and reveals new text left to right, route guide on choice screens (H hides it), intro videos (when idle on the main menu, unlocked by completing routes, and at key moments), blue check on completed routes in the flowchart choice.
 // @match        https://fatestaynight.vnovel.org/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -47,14 +47,17 @@ const VIDEOS = {
   hf: VIDEO_BASE + "heavens-feel.mp4"
 };
 // A route counts as COMPLETED when every scene listed here has its green checkmark (fully read).
-// Completed routes (1) get their opening played when you stay idle on the main menu and (2) get a blue check
-// in the main menu's flowchart choice. Paths look like the page address without the domain.
-// An empty list = that route can never count as completed.
+// A completed route gets a blue check next to it in the main menu's flowchart choice, and it unlocks the
+// NEXT opening (see OPENING_UNLOCK). Paths look like the page address without the domain.
 const ROUTE_DONE = {
-  fate: ["/prologue/1", "/prologue/2", "/prologue/3"],
-  ubw: ["/fate/1st-day/0", "/fate/15th-day/11", "/fate/15th-day/13", "/fate/15th-day/17"],
-  hf: ["/ubw/3rd-day/9", "/ubw/4th-day/3", "/ubw/14th-day/9", "/ubw/14th-day/12"]
+  prologue: ["/prologue/1", "/prologue/2", "/prologue/3"],
+  fate: ["/fate/1st-day/0", "/fate/15th-day/11", "/fate/15th-day/13", "/fate/15th-day/17"],
+  ubw: ["/ubw/3rd-day/9", "/ubw/4th-day/3", "/ubw/14th-day/9", "/ubw/14th-day/12"],
+  hf: ["/hf/4th-day/11", "/hf/16th-day/21", "/hf/16th-day/22", "/hf/16th-day/10"]
 };
+// Which completed route unlocks which opening for the idle main menu: the Fate opening after the prologue,
+// the UBW opening after the Fate route, the Heaven's Feel opening after the UBW route. (Nothing follows HF.)
+const OPENING_UNLOCK = { fate: "prologue", ubw: "fate", hf: "ubw" };
 // ----------------------------------------
 
 const ORIGIN = location.origin;
@@ -875,8 +878,8 @@ function watchScene() {
 
 // ================= Intro video =================
 // On the main menu pages (/, /fate, /ubw, /hf), if the page stays unchanged for a while (25 s the
-// first time, 40 s once a video was watched), a big window plays the opening of a route you have completed
-// (see ROUTE_DONE; nothing plays until a route is completed). Not inside scenes. The countdown restarts after
+// first time, 40 s once a video was watched), a big window plays an opening you have unlocked
+// (see OPENING_UNLOCK; nothing plays until the prologue is completed). Not inside scenes. The countdown restarts after
 // the window closes. No controls: just an X (or Esc) to close it.
 // ----- silence the VN's own music while a video plays -----
 // Mutes <audio>/<video> elements of the page (including ones the page created with
@@ -940,14 +943,14 @@ store.get("fsnVideosSeen", {}, (v) => {
 });
 
 // The opening that plays when you stay idle on the main menu depends on which routes you have completed
-// (see ROUTE_DONE at the top). Nothing plays idly until one route is completed. With several completed routes
-// the openings take turns: each time one plays, the next completed route (Fate, then UBW, then HF) is next.
+// (see OPENING_UNLOCK at the top). Nothing plays idly until the prologue is completed. With several unlocked
+// openings they take turns: each time one plays, the next unlocked one (Fate, then UBW, then HF) is next.
 const IDLE_ORDER = ["fate", "ubw", "hf"];
 let idleLast = null; // the route whose opening was shown last while idle
 store.get("fsnIdleLast", null, (v) => { idleLast = IDLE_ORDER.includes(v) ? v : null; });
 
 function pickIdleKind() {
-  const ready = IDLE_ORDER.filter((k) => routeComplete(k) && !failedRoutes[k]);
+  const ready = IDLE_ORDER.filter((k) => routeComplete(OPENING_UNLOCK[k]) && !failedRoutes[k]);
   if (!ready.length) return null;
   const start = IDLE_ORDER.indexOf(idleLast) + 1; // 0 when nothing has played yet
   for (let i = 0; i < IDLE_ORDER.length; i++) {
@@ -1896,7 +1899,7 @@ let titleWide = false;    // big computer screens: the title picture is shown la
 let titleEnabled = true;  // Settings switch: false = no title screen at all (plain flowchart page)
 store.get("fsnTitleOn", true, (v) => { titleEnabled = v !== false; });
 const FLOW_ROUTES = [
-  { label: "Prologue", path: "/fate", color: "#5f6672", glow: "#bfe6ff", jump: "prologue" }, // the Prologue square sits at the top of the Fate chart
+  { label: "Prologue", path: "/fate", color: "#5f6672", glow: "#bfe6ff", jump: "prologue", kind: "prologue" }, // the Prologue square sits at the top of the Fate chart
   { label: "Fate", path: "/fate", color: "#2f6fdb", glow: "#4aa8ff", kind: "fate" },
   { label: "Unlimited Blade Works", path: "/ubw", color: "#c0392b", glow: "#ff5a5a", kind: "ubw" },
   { label: "Heaven's Feel", path: "/hf", color: "#8e3bd1", glow: "#c585ff", kind: "hf" }
